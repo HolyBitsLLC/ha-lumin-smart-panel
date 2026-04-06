@@ -9,7 +9,7 @@ from homeassistant.const import CONF_ACCESS_TOKEN
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api import LuminApiClient, LuminPanel
+from .api import LuminApiClient, LuminPanel, LuminTokenManager
 from .const import (
     DOMAIN,
     PLATFORMS,
@@ -18,7 +18,10 @@ from .const import (
     CONF_PANEL_IP,
     CONF_PANEL_NAME,
     CONF_PANEL_LSP_ID,
+    CONF_REFRESH_TOKEN,
     CONF_USE_CLOUD_FALLBACK,
+    AUTH0_DOMAIN,
+    AUTH0_CLIENT_ID,
 )
 from .coordinator import LuminDataCoordinator
 
@@ -31,8 +34,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: LuminConfigEntry) -> boo
     """Set up Lumin Smart Panel from a config entry."""
     session = async_get_clientsession(hass)
     token = entry.data[CONF_ACCESS_TOKEN]
+    refresh_token = entry.data.get(CONF_REFRESH_TOKEN, "")
     panels_config = entry.data.get(CONF_PANELS, [])
     use_cloud = entry.data.get(CONF_USE_CLOUD_FALLBACK, True)
+
+    async def _on_tokens_refreshed(new_access: str, new_refresh: str) -> None:
+        """Persist refreshed tokens to the config entry and update WS clients."""
+        hass.config_entries.async_update_entry(
+            entry,
+            data={**entry.data, CONF_ACCESS_TOKEN: new_access, CONF_REFRESH_TOKEN: new_refresh},
+        )
+        # Push new token to WebSocket clients (they need it for cloud reconnect)
+        if entry.runtime_data:
+            entry.runtime_data.update_ws_tokens(new_access)
+        _LOGGER.debug("Persisted refreshed tokens to config entry")
+
+    token_manager = LuminTokenManager(
+        session=session,
+        access_token=token,
+        refresh_token=refresh_token,
+        auth0_domain=AUTH0_DOMAIN,
+        client_id=AUTH0_CLIENT_ID,
+        on_tokens_refreshed=_on_tokens_refreshed,
+    )
 
     panels = []
     for pc in panels_config:
@@ -49,6 +73,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: LuminConfigEntry) -> boo
         access_token=token,
         panels=panels,
         use_cloud_fallback=use_cloud,
+        token_manager=token_manager,
     )
 
     coordinator = LuminDataCoordinator(hass, client)

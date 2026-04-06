@@ -18,12 +18,16 @@ Cloud API (api.luminsmart.com):
 from __future__ import annotations
 
 import logging
-from typing import Any
+import time
+from typing import Any, Callable, Coroutine
 
 import aiohttp
 import ssl
 
 _LOGGER = logging.getLogger(__name__)
+
+# Buffer before actual expiry to trigger proactive refresh (5 minutes)
+TOKEN_EXPIRY_BUFFER = 300
 
 
 class LuminAuthError(Exception):
@@ -32,6 +36,101 @@ class LuminAuthError(Exception):
 
 class LuminConnectionError(Exception):
     """Connection error."""
+
+
+class LuminTokenManager:
+    """Manages Auth0 token lifecycle — refresh before expiry, retry on 401.
+
+    Auth0 refresh endpoint: POST https://{domain}/oauth/token
+    with grant_type=refresh_token, client_id, refresh_token.
+    """
+
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        access_token: str,
+        refresh_token: str,
+        auth0_domain: str,
+        client_id: str,
+        on_tokens_refreshed: Callable[[str, str], Coroutine] | None = None,
+    ) -> None:
+        self._session = session
+        self._access_token = access_token
+        self._refresh_token = refresh_token
+        self._auth0_domain = auth0_domain
+        self._client_id = client_id
+        self._on_tokens_refreshed = on_tokens_refreshed
+        self._expires_at: float = 0  # unknown until first refresh
+        self._refreshing = False
+
+    @property
+    def access_token(self) -> str:
+        return self._access_token
+
+    @property
+    def refresh_token(self) -> str:
+        return self._refresh_token
+
+    def set_expiry(self, expires_in: int) -> None:
+        """Set token expiry from expires_in seconds."""
+        self._expires_at = time.monotonic() + expires_in
+
+    @property
+    def token_expired(self) -> bool:
+        """True if the token is expired or will expire within the buffer."""
+        if self._expires_at == 0:
+            return False  # unknown expiry, assume valid until 401
+        return time.monotonic() >= (self._expires_at - TOKEN_EXPIRY_BUFFER)
+
+    async def ensure_valid_token(self) -> str:
+        """Return a valid access token, refreshing proactively if needed."""
+        if self.token_expired and self._refresh_token:
+            await self.async_refresh()
+        return self._access_token
+
+    async def async_refresh(self) -> None:
+        """Exchange refresh token for a new access token via Auth0."""
+        if self._refreshing:
+            return
+        if not self._refresh_token:
+            raise LuminAuthError("No refresh token available")
+
+        self._refreshing = True
+        try:
+            url = f"https://{self._auth0_domain}/oauth/token"
+            payload = {
+                "grant_type": "refresh_token",
+                "client_id": self._client_id,
+                "refresh_token": self._refresh_token,
+            }
+            async with self._session.post(
+                url, json=payload, timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    _LOGGER.error("Token refresh failed (%d): %s", resp.status, body)
+                    raise LuminAuthError(
+                        f"Token refresh failed with status {resp.status}"
+                    )
+                data = await resp.json()
+
+            new_access = data.get("access_token")
+            new_refresh = data.get("refresh_token", self._refresh_token)
+            expires_in = data.get("expires_in", 86400)
+
+            if not new_access:
+                raise LuminAuthError("Token refresh returned no access_token")
+
+            self._access_token = new_access
+            self._refresh_token = new_refresh
+            self._expires_at = time.monotonic() + expires_in
+            _LOGGER.debug("Token refreshed, expires in %ds", expires_in)
+
+            if self._on_tokens_refreshed:
+                await self._on_tokens_refreshed(new_access, new_refresh)
+
+        finally:
+            self._refreshing = False
 
 
 class LuminPanel:
@@ -274,11 +373,13 @@ class LuminApiClient:
         access_token: str,
         panels: list[LuminPanel],
         use_cloud_fallback: bool = True,
+        token_manager: LuminTokenManager | None = None,
     ) -> None:
         self._session = session
         self._token = access_token
         self._panels = {p.guid: p for p in panels}
         self._use_cloud_fallback = use_cloud_fallback
+        self._token_manager = token_manager
 
         self._local_clients: dict[str, LuminLocalClient] = {}
         for panel in panels:
@@ -296,6 +397,24 @@ class LuminApiClient:
             client._token = access_token
         self._cloud_client._token = access_token
 
+    async def async_ensure_token(self) -> None:
+        """Proactively refresh the token if it's near expiry."""
+        if self._token_manager:
+            new_token = await self._token_manager.ensure_valid_token()
+            if new_token != self._token:
+                self.update_token(new_token)
+
+    async def async_handle_auth_error(self) -> bool:
+        """Attempt token refresh on 401. Returns True if refresh succeeded."""
+        if not self._token_manager or not self._token_manager.refresh_token:
+            return False
+        try:
+            await self._token_manager.async_refresh()
+            self.update_token(self._token_manager.access_token)
+            return True
+        except LuminAuthError:
+            return False
+
     @property
     def panels(self) -> dict[str, LuminPanel]:
         return self._panels
@@ -308,14 +427,27 @@ class LuminApiClient:
         return self._cloud_client
 
     async def get_circuits(self, panel: LuminPanel) -> list[dict[str, Any]]:
-        """Get circuits - try local first, fall back to cloud."""
+        """Get circuits - try local first, fall back to cloud. Retries on 401."""
+        await self.async_ensure_token()
+
         local = self._local_clients.get(panel.guid)
         if local:
             try:
                 circuits = await local.get_circuits()
                 panel.available = True
                 return circuits
-            except (LuminConnectionError, LuminAuthError) as err:
+            except LuminAuthError:
+                if await self.async_handle_auth_error():
+                    try:
+                        circuits = await local.get_circuits()
+                        panel.available = True
+                        return circuits
+                    except (LuminConnectionError, LuminAuthError) as err:
+                        _LOGGER.debug("Local API retry failed for %s: %s", panel.guid, err)
+                        panel.available = False
+                else:
+                    raise
+            except LuminConnectionError as err:
                 _LOGGER.debug("Local API failed for %s: %s", panel.guid, err)
                 panel.available = False
 
@@ -333,7 +465,9 @@ class LuminApiClient:
     async def switch_circuit(
         self, panel: LuminPanel, circuit_id: int, turn_on: bool
     ) -> dict[str, Any] | None:
-        """Switch circuit - try local first, fall back to cloud."""
+        """Switch circuit - try local first, fall back to cloud. Retries on 401."""
+        await self.async_ensure_token()
+
         local = self._local_clients.get(panel.guid)
         if local:
             try:

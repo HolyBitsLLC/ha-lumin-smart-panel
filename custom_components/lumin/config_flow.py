@@ -62,6 +62,7 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             token = user_input[CONF_ACCESS_TOKEN].strip()
+            refresh = user_input.get(CONF_REFRESH_TOKEN, "").strip()
             session = async_get_clientsession(self.hass)
             cloud = LuminCloudClient(session, token)
 
@@ -71,6 +72,7 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"] = "no_panels"
                 else:
                     self._access_token = token
+                    self._refresh_token = refresh
                     self._panels = panels
                     return await self.async_step_select_panels()
             except LuminAuthError:
@@ -84,6 +86,7 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_ACCESS_TOKEN): str,
+                    vol.Optional(CONF_REFRESH_TOKEN, default=""): str,
                 }
             ),
             errors=errors,

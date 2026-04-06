@@ -60,6 +60,11 @@ class LuminDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await ws.start()
             _LOGGER.debug("Started WS for panel %s (lsp_id=%d)", guid, panel.lsp_id)
 
+    def update_ws_tokens(self, new_token: str) -> None:
+        """Push a refreshed access token to all WebSocket clients."""
+        for ws in self._ws_clients:
+            ws.update_token(new_token)
+
     async def async_shutdown_websockets(self) -> None:
         """Stop all WebSocket connections."""
         for ws in self._ws_clients:

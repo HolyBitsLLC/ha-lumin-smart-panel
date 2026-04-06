@@ -12,9 +12,10 @@
       },
       "token": {
         "title": "Lumin Account Authentication",
-        "description": "Enter your access token from the Lumin portal.\n\n1. Go to {portal_url}\n2. Log in with your Lumin account\n3. Open browser DevTools (F12)\n4. Go to Application → Local Storage\n5. Copy the `access_token` value",
+        "description": "Enter your tokens from the Lumin portal.\n\n1. Go to {portal_url}\n2. Log in with your Lumin account\n3. Open browser DevTools (F12)\n4. Go to Application → Local Storage\n5. Copy `access_token` and `refresh_token`\n\nThe refresh token keeps the integration authenticated indefinitely.",
         "data": {
-          "access_token": "Access Token"
+          "access_token": "Access Token",
+          "refresh_token": "Refresh Token (recommended)"
         }
       },
       "select_panels": {
