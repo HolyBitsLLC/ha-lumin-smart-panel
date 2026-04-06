@@ -5,34 +5,41 @@ on:
   pull_request:
     branches: [master]
 
+# Restrict GITHUB_TOKEN to read-only for all jobs
+permissions:
+  contents: read
+
 jobs:
   lint:
-    runs-on: [self-hosted, linux, x64, krubecible, holybits-shared]
+    # SECURITY: PRs from forks run on GitHub-hosted runners to prevent
+    # arbitrary code execution on self-hosted infrastructure.
+    # Only pushes to master (trusted code) run on self-hosted runners.
+    runs-on: ${{ github.event_name == 'push' && fromJSON('["self-hosted", "linux", "x64", "krubecible", "holybits-shared"]') || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: "3.12"
       - run: pip install ruff
       - run: ruff check .
 
   test:
-    runs-on: [self-hosted, linux, x64, krubecible, holybits-shared]
+    runs-on: ${{ github.event_name == 'push' && fromJSON('["self-hosted", "linux", "x64", "krubecible", "holybits-shared"]') || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: "3.12"
       - run: pip install pytest pytest-cov aiohttp
       - run: pytest --cov=custom_components/lumin --cov-report=xml -v || echo "No tests yet"
-      - uses: codecov/codecov-action@v4
+      - uses: codecov/codecov-action@13bc40b3764cf0988e1d17b22c097653982b0dbe # v4.6.0
         if: always()
 
   validate:
-    runs-on: [self-hosted, linux, x64, krubecible, holybits-shared]
+    runs-on: ${{ github.event_name == 'push' && fromJSON('["self-hosted", "linux", "x64", "krubecible", "holybits-shared"]') || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: "3.12"
       - name: Validate manifest
