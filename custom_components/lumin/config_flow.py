@@ -13,6 +13,7 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.const import CONF_ACCESS_TOKEN
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import TextSelector, TextSelectorConfig
 
 from .api import LuminCloudClient, LuminLocalClient, LuminPanel, LuminAuthError
 from .const import (
@@ -92,7 +93,9 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="token",
             data_schema=vol.Schema(
                 {
-                    vol.Required("token_data"): str,
+                    vol.Required("token_data"): TextSelector(
+                        TextSelectorConfig(multiline=True)
+                    ),
                 }
             ),
             errors=errors,
