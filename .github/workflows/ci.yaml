@@ -4,6 +4,7 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+
 jobs:
   lint:
     runs-on: [self-hosted, linux, x64, krubecible, holybits-shared]
@@ -14,6 +15,7 @@ jobs:
           python-version: "3.12"
       - run: pip install ruff
       - run: ruff check .
+
   test:
     runs-on: [self-hosted, linux, x64, krubecible, holybits-shared]
     steps:
@@ -23,3 +25,19 @@ jobs:
           python-version: "3.12"
       - run: pip install pytest pytest-cov aiohttp
       - run: pytest --cov=custom_components/lumin --cov-report=xml -v || echo "No tests yet"
+      - uses: codecov/codecov-action@v4
+        if: always()
+
+  validate:
+    runs-on: [self-hosted, linux, x64, krubecible, holybits-shared]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate manifest
+        run: python -c "import json; json.load(open('custom_components/lumin/manifest.json'))"
+      - name: Validate strings
+        run: python -c "import json; json.load(open('custom_components/lumin/strings.json'))"
+      - name: Validate translations
+        run: python -c "import json; json.load(open('custom_components/lumin/translations/en.json'))"
