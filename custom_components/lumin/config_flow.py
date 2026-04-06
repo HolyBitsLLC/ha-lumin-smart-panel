@@ -15,7 +15,7 @@ from homeassistant.const import CONF_ACCESS_TOKEN
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import TextSelector, TextSelectorConfig
 
-from .api import LuminCloudClient, LuminLocalClient, LuminPanel, LuminAuthError
+from .api import LuminCloudClient, LuminLocalClient, LuminPanel, LuminAuthError, LuminConnectionError
 from .const import (
     DOMAIN,
     CONF_PANELS,
@@ -66,7 +66,17 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             raw = user_input.get("token_data", "").strip()
+            _LOGGER.debug(
+                "Token input received: length=%d, starts_with=%s",
+                len(raw),
+                raw[:40] + "..." if len(raw) > 40 else raw,
+            )
             token, refresh = self._parse_token_input(raw)
+            _LOGGER.debug(
+                "Parse result: token_len=%d, has_refresh=%s",
+                len(token),
+                bool(refresh),
+            )
 
             if not token:
                 errors["base"] = "invalid_token_format"
@@ -77,14 +87,20 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 try:
                     panels = await cloud.get_panels()
                     if not panels:
+                        _LOGGER.warning("Token valid but no panels found on account")
                         errors["base"] = "no_panels"
                     else:
+                        _LOGGER.debug("Found %d panels", len(panels))
                         self._access_token = token
                         self._refresh_token = refresh
                         self._panels = panels
                         return await self.async_step_select_panels()
-                except LuminAuthError:
+                except LuminAuthError as err:
+                    _LOGGER.warning("Auth failed: %s", err)
                     errors["base"] = "invalid_auth"
+                except LuminConnectionError as err:
+                    _LOGGER.error("Connection error during panel fetch: %s", err)
+                    errors["base"] = "cannot_connect"
                 except Exception:
                     _LOGGER.exception("Unexpected error during auth")
                     errors["base"] = "unknown"
