@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 import aiohttp
@@ -103,9 +104,9 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     @staticmethod
     def _parse_token_input(raw: str) -> tuple[str, str]:
-        """Parse token input — accepts JSON blob or raw JWT.
+        """Parse token input — accepts JSON blob, truncated JSON, or raw JWT.
 
-        Auth0 Local Storage format:
+        Auth0 Local Storage format (may be very large and get truncated):
           {"body":{"access_token":"...","refresh_token":"...",...}}
         Also accepts the inner body object directly:
           {"access_token":"...","refresh_token":"...",...}
@@ -116,24 +117,39 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if not raw:
             return ("", "")
 
-        # Try JSON parse first
-        if raw.startswith("{"):
-            try:
-                data = json.loads(raw)
-                # Handle {"body": {"access_token": "..."}} wrapper
+        # Try clean JSON parse first
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
                 if "body" in data and isinstance(data["body"], dict):
                     data = data["body"]
                 access = data.get("access_token", "")
                 refresh = data.get("refresh_token", "")
                 if access:
                     return (access, refresh)
-            except (json.JSONDecodeError, TypeError, KeyError):
-                pass
-            return ("", "")
+        except (json.JSONDecodeError, TypeError, KeyError):
+            pass
+
+        # Regex fallback — handles truncated JSON from large Local Storage blobs.
+        # The access_token is a JWT (ey...) and refresh_token starts with v1.
+        access_match = re.search(
+            r'"access_token"\s*:\s*"(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)"',
+            raw,
+        )
+        refresh_match = re.search(
+            r'"refresh_token"\s*:\s*"([^"]+)"',
+            raw,
+        )
+        if access_match:
+            return (
+                access_match.group(1),
+                refresh_match.group(1) if refresh_match else "",
+            )
 
         # Plain JWT string (starts with ey = base64 of {"alg":...)
-        if raw.startswith("ey") and "." in raw:
-            return (raw, "")
+        stripped = raw.strip()
+        if stripped.startswith("ey") and "." in stripped:
+            return (stripped, "")
 
         return ("", "")
 
