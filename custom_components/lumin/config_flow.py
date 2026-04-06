@@ -13,7 +13,14 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.const import CONF_ACCESS_TOKEN
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.selector import TextSelector, TextSelectorConfig
+from homeassistant.helpers.selector import (
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+    TextSelector,
+    TextSelectorConfig,
+)
 
 from .api import LuminCloudClient, LuminLocalClient, LuminPanel, LuminAuthError, LuminConnectionError
 from .const import (
@@ -183,18 +190,24 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ]
             return await self.async_step_panel_ips()
 
-        panel_options = {
-            str(p["id"]): f"{p.get('name', 'Panel')} (GUID: {p.get('guid', 'unknown')})"
+        panel_options = [
+            SelectOptionDict(
+                value=str(p["id"]),
+                label=f"{p.get('name', 'Panel')} (GUID: {p.get('guid', 'unknown')})",
+            )
             for p in self._panels
-        }
+        ]
 
         return self.async_show_form(
             step_id="select_panels",
             data_schema=vol.Schema(
                 {
-                    vol.Required("panels"): vol.All(
-                        vol.Coerce(list),
-                        [vol.In(panel_options)],
+                    vol.Required("panels"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=panel_options,
+                            multiple=True,
+                            mode=SelectSelectorMode.LIST,
+                        )
                     ),
                 }
             ),
