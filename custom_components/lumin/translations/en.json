@@ -1,0 +1,48 @@
+{
+  "title": "Lumin Smart Panel",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Lumin Smart Panel",
+        "description": "Choose how to set up your Lumin Smart Panel.",
+        "menu_options": {
+          "token": "Authenticate with Lumin account (cloud + local)",
+          "manual_panel": "Add a panel manually by IP address (local only)"
+        }
+      },
+      "token": {
+        "title": "Lumin Account Authentication",
+        "description": "Enter your access token from the Lumin portal.\n\n1. Go to {portal_url}\n2. Log in with your Lumin account\n3. Open browser DevTools (F12)\n4. Go to Application → Local Storage\n5. Copy the `access_token` value",
+        "data": {
+          "access_token": "Access Token"
+        }
+      },
+      "select_panels": {
+        "title": "Select Panels",
+        "description": "Select which Lumin Smart Panels to add to Home Assistant.",
+        "data": {
+          "panels": "Panels"
+        }
+      },
+      "panel_ips": {
+        "title": "Panel IP Addresses",
+        "description": "Enter the local IP address for each panel for local-first communication. Leave blank to use cloud-only for that panel."
+      },
+      "manual_panel": {
+        "title": "Manual Panel Setup",
+        "description": "Add a Lumin Smart Panel directly by IP address. You will need an access token from the Lumin portal.",
+        "data": {
+          "panel_ip": "Panel IP Address",
+          "access_token": "Access Token",
+          "panel_name": "Panel Name (optional)"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid access token. Please check your token and try again.",
+      "no_panels": "No panels found on this Lumin account.",
+      "cannot_connect": "Cannot connect to the panel at the specified IP address.",
+      "unknown": "An unexpected error occurred."
+    }
+  }
+}

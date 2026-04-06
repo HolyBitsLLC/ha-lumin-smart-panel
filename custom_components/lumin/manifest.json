@@ -1,0 +1,12 @@
+{
+  "domain": "lumin",
+  "name": "Lumin Smart Panel",
+  "codeowners": ["@claywd"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/HolyBitsLLC/ha-lumin-smart-panel",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/HolyBitsLLC/ha-lumin-smart-panel/issues",
+  "requirements": ["aiohttp>=3.8.0"],
+  "version": "0.1.0"
+}
