@@ -12,10 +12,9 @@
       },
       "token": {
         "title": "Lumin Account Authentication",
-        "description": "Enter your tokens from the Lumin portal.\n\n1. Go to {portal_url}\n2. Log in with your Lumin account\n3. Open browser DevTools (F12)\n4. Go to Application → Local Storage\n5. Copy `access_token` and `refresh_token`\n\nThe refresh token keeps the integration authenticated indefinitely.",
+        "description": "Paste your token data from the Lumin portal.\n\n1. Go to {portal_url} and log in\n2. Open browser DevTools (F12)\n3. Go to Application → Local Storage → portal.luminsmart.com\n4. Click the auth entry and copy the entire Value field\n\nYou can paste the full JSON blob or just the access_token string. The refresh token (included in the JSON) keeps the integration authenticated indefinitely.",
         "data": {
-          "access_token": "Access Token",
-          "refresh_token": "Refresh Token (recommended)"
+          "token_data": "Token Data (paste JSON blob or access token)"
         }
       },
       "select_panels": {
@@ -41,6 +40,7 @@
     },
     "error": {
       "invalid_auth": "Invalid access token. Please check your token and try again.",
+      "invalid_token_format": "Could not parse token data. Paste the full JSON value from Local Storage, or a raw access token starting with 'ey'.",
       "no_panels": "No panels found on this Lumin account.",
       "cannot_connect": "Cannot connect to the panel at the specified IP address.",
       "unknown": "An unexpected error occurred."

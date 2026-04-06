@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -55,38 +56,42 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> config_entries.ConfigFlowResult:
         """Handle token-based authentication.
 
-        User provides an access token from portal.luminsmart.com.
-        In the future, this will be replaced with a proper OAuth flow.
+        Accepts either:
+        1. The full JSON blob from portal Local Storage (auto-extracts tokens)
+        2. A raw JWT access token string
         """
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            token = user_input[CONF_ACCESS_TOKEN].strip()
-            refresh = user_input.get(CONF_REFRESH_TOKEN, "").strip()
-            session = async_get_clientsession(self.hass)
-            cloud = LuminCloudClient(session, token)
+            raw = user_input.get("token_data", "").strip()
+            token, refresh = self._parse_token_input(raw)
 
-            try:
-                panels = await cloud.get_panels()
-                if not panels:
-                    errors["base"] = "no_panels"
-                else:
-                    self._access_token = token
-                    self._refresh_token = refresh
-                    self._panels = panels
-                    return await self.async_step_select_panels()
-            except LuminAuthError:
-                errors["base"] = "invalid_auth"
-            except Exception:
-                _LOGGER.exception("Unexpected error during auth")
-                errors["base"] = "unknown"
+            if not token:
+                errors["base"] = "invalid_token_format"
+            else:
+                session = async_get_clientsession(self.hass)
+                cloud = LuminCloudClient(session, token)
+
+                try:
+                    panels = await cloud.get_panels()
+                    if not panels:
+                        errors["base"] = "no_panels"
+                    else:
+                        self._access_token = token
+                        self._refresh_token = refresh
+                        self._panels = panels
+                        return await self.async_step_select_panels()
+                except LuminAuthError:
+                    errors["base"] = "invalid_auth"
+                except Exception:
+                    _LOGGER.exception("Unexpected error during auth")
+                    errors["base"] = "unknown"
 
         return self.async_show_form(
             step_id="token",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_ACCESS_TOKEN): str,
-                    vol.Optional(CONF_REFRESH_TOKEN, default=""): str,
+                    vol.Required("token_data"): str,
                 }
             ),
             errors=errors,
@@ -95,6 +100,42 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "portal_url": "https://portal.luminsmart.com",
             },
         )
+
+    @staticmethod
+    def _parse_token_input(raw: str) -> tuple[str, str]:
+        """Parse token input — accepts JSON blob or raw JWT.
+
+        Auth0 Local Storage format:
+          {"body":{"access_token":"...","refresh_token":"...",...}}
+        Also accepts the inner body object directly:
+          {"access_token":"...","refresh_token":"...",...}
+        Or a plain JWT string starting with 'ey'.
+
+        Returns (access_token, refresh_token). Empty strings on failure.
+        """
+        if not raw:
+            return ("", "")
+
+        # Try JSON parse first
+        if raw.startswith("{"):
+            try:
+                data = json.loads(raw)
+                # Handle {"body": {"access_token": "..."}} wrapper
+                if "body" in data and isinstance(data["body"], dict):
+                    data = data["body"]
+                access = data.get("access_token", "")
+                refresh = data.get("refresh_token", "")
+                if access:
+                    return (access, refresh)
+            except (json.JSONDecodeError, TypeError, KeyError):
+                pass
+            return ("", "")
+
+        # Plain JWT string (starts with ey = base64 of {"alg":...)
+        if raw.startswith("ey") and "." in raw:
+            return (raw, "")
+
+        return ("", "")
 
     async def async_step_select_panels(
         self, user_input: dict[str, Any] | None = None
