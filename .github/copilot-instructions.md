@@ -1,0 +1,1 @@
+/home/user/homelab/harvester-argo/.github/copilot-instructions.md
