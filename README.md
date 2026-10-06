@@ -103,7 +103,7 @@ Home Assistant
 
 - **Local-first**: Always tries the local panel API first, falls back to cloud if unreachable
 - **WebSocket reconnect**: Auto-reconnects with exponential backoff (2s → 60s)
-- **Token lifecycle**: Proactively refreshes Auth0 tokens 5 minutes before expiry; persists refreshed tokens to the config entry
+- **Token lifecycle**: Refreshes Auth0 tokens 5 minutes before expiry once the integration has seen a refresh response; persists refreshed tokens to the config entry. After a Home Assistant restart the expiry is unknown (`api.py`: `_expires_at = 0`, treated as valid until a 401), so the first refresh happens when the panel rejects the old token, followed by one retry — expect a single `unknown` sample at that moment
 
 ## Panel Info
 
