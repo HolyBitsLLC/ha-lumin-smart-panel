@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Fail when the inlined Kaniko job drifts from its pinned mirror point.
 
 The delivery image is built by a Kaniko Job that is *inlined* into
@@ -53,10 +52,8 @@ GLUE_SUFFIX = "${DEST_ARGS}"
 
 def normalise_flag(token: str) -> str:
     """Reduce a captured YAML list item to the Kaniko flag it represents."""
-    token = token.rstrip('"').rstrip("'")
-    if token.endswith(GLUE_SUFFIX):
-        token = token[: -len(GLUE_SUFFIX)]
-    return token
+    token = token.rstrip("\"'")
+    return token.removesuffix(GLUE_SUFFIX)
 
 
 def extract_flags(text: str) -> list[str]:
