@@ -13,6 +13,10 @@
 # private side clones this repository at a pinned commit and pushes the result
 # to harbor.dittmanfamily.com/holybitsllc/ha-lumin-smart-panel.
 #
+# There are deliberately no build args: the consumer identifies the payload by
+# hashing the staged tree, so an image built by hand and an image built by CI
+# are the same artifact and no provenance file can silently be empty.
+#
 # The Alpine base is deliberate: the init container's shell, `cp`, `sed`, `awk`
 # and `grep` come from busybox, and an ~8 MB carrier is cheap to re-pull on
 # every Home Assistant pod start.
@@ -27,17 +31,12 @@ LABEL org.opencontainers.image.title="ha-lumin-smart-panel" \
 # broken build can never half-install over a working copy.
 COPY custom_components/lumin/ /opt/lumin/
 
-# Build provenance. `install-lumin` reads `revision` to decide whether the copy
-# on the PVC already came from this image -- it must not infer that from
-# manifest.json's version, which release-please bumps only when it cuts a
-# release (a bugfix merged without a release would otherwise look identical).
-ARG LUMIN_REVISION=""
+# Fail the build here, not after a bad image has replaced a working copy on
+# someone's PVC.
 RUN set -eu; \
-    printf '{"revision":"%s"}\n' "${LUMIN_REVISION}" > /opt/lumin-image.json; \
     test -s /opt/lumin/manifest.json; \
     test -s /opt/lumin/__init__.py; \
-    test -s /opt/lumin/config_flow.py; \
-    test -s /opt/lumin-image.json
+    test -s /opt/lumin/config_flow.py
 
 # No Python runtime and no requirements install: the integration's only
 # requirement is `aiohttp>=3.8.0`, which Home Assistant already ships and pins
