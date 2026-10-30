@@ -48,3 +48,9 @@ jobs:
         run: python -c "import json; json.load(open('custom_components/lumin/strings.json'))"
       - name: Validate translations
         run: python -c "import json; json.load(open('custom_components/lumin/translations/en.json'))"
+      - name: Guard the inlined Kaniko mirror against drift
+        # The image build inlines `harvester-argo`'s Kaniko reusable (a public
+        # caller cannot use a private reusable). This fails as soon as the
+        # inline job stops matching the pinned mirror point, so drift is caught
+        # on the PR instead of on the next publish.
+        run: python3 scripts/check-kaniko-mirror.py

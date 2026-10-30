@@ -32,6 +32,42 @@ name: Publish Image
 # org must publish `reusable-kaniko-build.yaml` in a PUBLIC repository and
 # replace the `Build and push via Kaniko Job` step below with a `uses:` call.
 #
+# ── Mirror provenance — the exact point this inline copy mirrors ────────────
+# The inlined job below mirrors ONE file at ONE commit:
+#
+#   HolyBitsLLC/harvester-argo@b5805e045d255da1d034804fe321c6207b3056f9
+#     .github/workflows/reusable-kaniko-build.yaml
+#     (blob 7a6d4928e523674c98dca44362a8e09eab487ae0, job `kaniko-build`,
+#      single-platform path — the branch without `platforms:` set)
+#
+# That commit is the newest commit touching the reusable on `main` as of
+# 2026-10-30. `.github/kaniko-mirror.json` records the same provenance plus the
+# exact Kaniko flags, images and Job skeleton this file is expected to carry.
+#
+# `scripts/check-kaniko-mirror.py` fails the `resolve` job below (and the
+# `validate` job in `ci.yaml`) when the inline Kaniko invocation no longer
+# matches that record, so drift turns a check red instead of silently shipping
+# a different builder.
+#
+# SCOPE OF THE GUARD — read this before trusting it. It proves "the inline copy
+# is unchanged since the pin". It CANNOT prove "the reusable has not changed
+# upstream": this repository is public and the reusable is private, and a
+# workflow here only ever gets a `github.token` scoped to this repository.
+# Teaching a public repo to read `harvester-argo` would require placing a
+# cross-repo credential here, which is exactly the exposure this design avoids.
+# Upstream drift is therefore detected when a human refreshes the pin, not
+# automatically.
+#
+# REFRESH PROCEDURE (do all of it in ONE commit):
+#   1. Read `reusable-kaniko-build.yaml` at the commit you are mirroring and
+#      diff its `kaniko-build` job against `Build and push via Kaniko Job`.
+#   2. Port any real difference into this file.
+#   3. Update `source_commit` / `source_blob` / `pinned_at` / `expected_flags`
+#      / `kaniko_image` / `clone_image` / `required_strings` in
+#      `.github/kaniko-mirror.json` to match the new mirror point.
+#   4. Update the commit hash in this comment block.
+#   5. Run `python3 scripts/check-kaniko-mirror.py` locally — it must pass.
+#
 # ── Runners ────────────────────────────────────────────────────────────────
 # Self-hosted, as the org requires: `self-hosted`, `linux`, `x64`,
 # `krubecible`, `holybits-shared`. These are the org-level runners registered
@@ -108,6 +144,13 @@ jobs:
           # ref this run was triggered on".
           ref: ${{ inputs.source_ref || github.ref }}
           fetch-depth: 1
+
+      - name: Guard the inlined Kaniko mirror against drift
+        # Fails the publish before anything is built if the inline Kaniko job
+        # no longer matches the pinned mirror point recorded in
+        # `.github/kaniko-mirror.json`. See the header for the exact reusable
+        # file/commit mirrored and the refresh procedure.
+        run: python3 scripts/check-kaniko-mirror.py
 
       - name: Assert the payload inventory in the checkout
         run: |
