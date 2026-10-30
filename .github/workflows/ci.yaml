@@ -32,7 +32,7 @@ jobs:
           python-version: "3.12"
       - run: pip install pytest pytest-cov aiohttp
       - run: pytest --cov=custom_components/lumin --cov-report=xml -v || echo "No tests yet"
-      - uses: codecov/codecov-action@13bc40b3764cf0988e1d17b22c097653982b0dbe # v4.6.0
+      - uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4.6.0
         if: always()
 
   validate:

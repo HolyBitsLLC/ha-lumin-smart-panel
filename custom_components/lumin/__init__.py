@@ -11,17 +11,16 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import LuminApiClient, LuminPanel, LuminTokenManager
 from .const import (
-    DOMAIN,
-    PLATFORMS,
-    CONF_PANELS,
+    AUTH0_CLIENT_ID,
+    AUTH0_DOMAIN,
     CONF_PANEL_GUID,
     CONF_PANEL_IP,
-    CONF_PANEL_NAME,
     CONF_PANEL_LSP_ID,
+    CONF_PANEL_NAME,
+    CONF_PANELS,
     CONF_REFRESH_TOKEN,
     CONF_USE_CLOUD_FALLBACK,
-    AUTH0_DOMAIN,
-    AUTH0_CLIENT_ID,
+    PLATFORMS,
 )
 from .coordinator import LuminDataCoordinator
 

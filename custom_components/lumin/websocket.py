@@ -16,7 +16,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import aiohttp
 
@@ -103,7 +104,7 @@ class LuminWebSocketClient:
                 await self._connect_and_listen()
             except asyncio.CancelledError:
                 break
-            except Exception as err:
+            except Exception as err:  # noqa: BLE001 - keep the reconnect loop alive
                 _LOGGER.debug("WS connection ended: %s", err)
 
             if self._stop_event.is_set():
@@ -119,7 +120,7 @@ class LuminWebSocketClient:
                     self._stop_event.wait(), timeout=self._reconnect_delay
                 )
                 break  # stop_event was set during wait
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
 
             self._reconnect_delay = min(

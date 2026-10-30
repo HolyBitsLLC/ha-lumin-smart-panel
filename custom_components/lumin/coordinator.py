@@ -9,7 +9,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import LuminApiClient, LuminConnectionError, LuminAuthError, LuminPanel
+from .api import LuminApiClient, LuminAuthError, LuminConnectionError
 from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
 from .websocket import LuminWebSocketClient
 

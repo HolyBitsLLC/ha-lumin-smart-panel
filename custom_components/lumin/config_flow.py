@@ -9,7 +9,6 @@ from typing import Any
 
 import aiohttp
 import voluptuous as vol
-
 from homeassistant import config_entries
 from homeassistant.const import CONF_ACCESS_TOKEN
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -22,19 +21,23 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
 )
 
-from .api import LuminCloudClient, LuminLocalClient, LuminPanel, LuminAuthError, LuminConnectionError
+from .api import (
+    LuminAuthError,
+    LuminCloudClient,
+    LuminConnectionError,
+    LuminLocalClient,
+    LuminPanel,
+)
 from .const import (
-    DOMAIN,
-    CONF_PANELS,
-    CONF_PANEL_IP,
+    AUTH0_DOMAIN,
     CONF_PANEL_GUID,
-    CONF_PANEL_NAME,
+    CONF_PANEL_IP,
     CONF_PANEL_LSP_ID,
+    CONF_PANEL_NAME,
+    CONF_PANELS,
     CONF_REFRESH_TOKEN,
     CONF_USE_CLOUD_FALLBACK,
-    AUTH0_DOMAIN,
-    AUTH0_CLIENT_ID,
-    AUTH0_AUDIENCE,
+    DOMAIN,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -265,7 +268,6 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         schema_dict = {}
         for panel in self._selected_panels:
             guid = panel.get("guid", "")
-            name = panel.get("name", f"Panel {guid[-6:]}")
             schema_dict[vol.Optional(f"ip_{guid}", default="")] = str
 
         return self.async_show_form(
@@ -306,7 +308,7 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     panel.lsp_id = lsp_id
                     if not name:
                         name = dev.get("name", f"Lumin {guid[-6:]}")
-            except Exception:
+            except Exception:  # noqa: BLE001 - best-effort probe of an untrusted panel
                 # Fall back to probing the setup page on 8085
                 try:
                     import re
@@ -318,7 +320,7 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         m = re.search(r"GUID:\s*(\w+)", text)
                         if m:
                             guid = m.group(1)
-                except Exception:
+                except Exception:  # noqa: BLE001 - probe is best-effort, never fatal
                     _LOGGER.debug("Could not probe panel at %s", ip)
 
             if not await local.test_connection():
