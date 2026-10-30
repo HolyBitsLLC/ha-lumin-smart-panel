@@ -1,0 +1,301 @@
+name: Publish Image
+
+# Builds the delivery image for this repository's Home Assistant integration
+# (custom_components/lumin) and pushes it to Harbor.
+#
+# Why the build lives here: the payload IS this repository's source, so the
+# image is built next to the code that defines it. It used to be built by the
+# private harvester-argo repository, which cloned a pinned commit of this
+# public tree and ran Kaniko on the estate's self-hosted runners.
+#
+# Runners: `ubuntu-latest` (GitHub-hosted) ONLY. This repository is PUBLIC, so
+# GitHub-hosted minutes are free and unmetered, and the estate's self-hosted
+# runners (`self-hosted`, `linux`, `x64`, `krubecible`, `holybits-shared`) hold
+# cluster and Harbor push access. Attaching them to a public repository's
+# workflow is the supply-chain exposure that made inlining Kaniko here
+# unattractive in the first place; a hosted runner dissolves it. `self-hosted`
+# must never appear in this file.
+#
+# Credentials: a Harbor *robot account* scoped to the `holybitsllc` project
+# (push + pull on that project only), supplied as the repository secrets
+# HARBOR_ROBOT_NAME / HARBOR_ROBOT_TOKEN. The shared `holybits-shared` Harbor
+# credential used by the private estate pipelines is deliberately NOT used
+# here: a credential leaked from a public repository must not be able to push
+# to every project.
+#
+# Tags (ADR-0073): immutable only. Every build publishes `sha-<full commit>`;
+# a `vX.Y.Z` release build publishes the release tag in addition. No floating
+# `master`/`latest` tag is ever pushed — a mutable reference is not a pin. The
+# consumer (harvester-argo's `install-lumin` init container) pins the
+# `@sha256:` digest anyway, and this workflow prints that digest to the run
+# summary and exposes it as an output.
+#
+# The build is gated on the payload assertion below (inventory + JSON shape,
+# asserted both on the checked-out tree and inside the built image at
+# /opt/lumin). The repository-wide `lint`/`test` gates are separate workflows
+# and are not wired in here because they are pre-existing red on `master`
+# (dead codecov action SHA, unpinned ruff findings) — a `needs:` on a permanently
+# red job would make this workflow permanently un-runnable.
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+    branches: [master]
+    paths:
+      - "custom_components/lumin/**"
+      - "Dockerfile"
+      - ".github/workflows/publish-image.yaml"
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Git ref to build (branch, tag or commit SHA). Leave empty to build the ref this run is dispatched on."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: harbor.dittmanfamily.com
+  IMAGE: holybitsllc/ha-lumin-smart-panel
+  # The payload inventory is an invariant: the consumer fingerprints the staged
+  # tree, so a silently added or dropped file changes the component identity.
+  # custom_components/lumin holds 12 files today (11 modules + translations/en.json).
+  PAYLOAD_FILES: "12"
+
+concurrency:
+  group: publish-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and verify payload
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      tags: ${{ steps.meta.outputs.tags }}
+      commit: ${{ steps.meta.outputs.commit }}
+      payload_fingerprint: ${{ steps.verify.outputs.payload_fingerprint }}
+    steps:
+      - name: Check out the build source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # `source_ref` is only set by workflow_dispatch; empty means "the ref
+          # this run was triggered on".
+          ref: ${{ inputs.source_ref || github.ref }}
+          fetch-depth: 1
+
+      - name: Resolve the commit, tags and push mode
+        id: meta
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse HEAD)"
+          tags="${REGISTRY}/${IMAGE}:sha-${commit}"
+          release_tag=""
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [[ "${GITHUB_REF_NAME}" == v* ]]; then
+            release_tag="${GITHUB_REF_NAME}"
+            tags="${tags},${REGISTRY}/${IMAGE}:${release_tag}"
+          fi
+          push="false"
+          case "${GITHUB_EVENT_NAME}" in
+            push|workflow_dispatch) push="true" ;;
+            pull_request) push="false" ;;
+          esac
+          {
+            echo "commit=${commit}"
+            echo "tags=${tags}"
+            echo "release_tag=${release_tag}"
+            echo "push=${push}"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Source"
+            echo ""
+            echo "- commit: \`${commit}\`"
+            echo "- ref: \`${GITHUB_REF}\` (${GITHUB_REF_TYPE})"
+            echo "- push: \`${push}\`"
+            echo "- tags: ${tags}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Assert the payload inventory in the checkout
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find custom_components/lumin -type f | sort)
+          printf '%s\n' "${files[@]}"
+          if [ "${#files[@]}" -ne "${PAYLOAD_FILES}" ]; then
+            echo "::error::expected ${PAYLOAD_FILES} payload files under custom_components/lumin, found ${#files[@]}"
+            exit 1
+          fi
+          for required in manifest.json __init__.py config_flow.py translations/en.json; do
+            if [ ! -s "custom_components/lumin/${required}" ]; then
+              echo "::error::custom_components/lumin/${required} is missing or empty"
+              exit 1
+            fi
+          done
+          python3 - <<'PY'
+          import json
+          import pathlib
+
+          root = pathlib.Path("custom_components/lumin")
+          manifest = json.loads((root / "manifest.json").read_text())
+          assert manifest["domain"] == "lumin", manifest["domain"]
+          assert manifest["name"], "manifest.json has no name"
+          assert isinstance(manifest.get("version"), str) and manifest["version"], (
+              "manifest.json has no version"
+          )
+          assert any(r.startswith("aiohttp") for r in manifest.get("requirements", [])), (
+              manifest.get("requirements")
+          )
+          for extra in ("strings.json", "translations/en.json"):
+              json.loads((root / extra).read_text())
+          print(f"manifest.json OK: {manifest['domain']} {manifest['version']}")
+          PY
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Assert the Harbor robot credentials exist
+        if: steps.meta.outputs.push == 'true'
+        env:
+          HARBOR_ROBOT_NAME: ${{ secrets.HARBOR_ROBOT_NAME }}
+          HARBOR_ROBOT_TOKEN: ${{ secrets.HARBOR_ROBOT_TOKEN }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "${HARBOR_ROBOT_NAME}" ] || missing="HARBOR_ROBOT_NAME"
+          [ -n "${HARBOR_ROBOT_TOKEN}" ] || missing="${missing:+${missing} }HARBOR_ROBOT_TOKEN"
+          if [ -n "${missing}" ]; then
+            echo "::error title=Harbor robot account missing::Repository secrets ${missing} are not set. Create a Harbor robot account scoped to project 'holybitsllc' with push+pull on that project only, then store its name and token as HARBOR_ROBOT_NAME and HARBOR_ROBOT_TOKEN. This job fails loudly rather than skipping the push, because a green run that published nothing is worse than a red one."
+            exit 1
+          fi
+
+      - name: Log in to Harbor
+        if: steps.meta.outputs.push == 'true'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.HARBOR_ROBOT_NAME }}
+          password: ${{ secrets.HARBOR_ROBOT_TOKEN }}
+
+      - name: Build the image
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: ${{ steps.meta.outputs.push == 'true' }}
+          load: ${{ steps.meta.outputs.push != 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.commit }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.release_tag }}
+          # A single-platform image manifest, deliberately. The consumer pins the
+          # `@sha256:` digest of this manifest; an attestation would wrap it in an
+          # index and change what that digest names.
+          provenance: false
+          sbom: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify the payload at /opt/lumin in the image
+        id: verify
+        env:
+          PUSHED: ${{ steps.meta.outputs.push }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          COMMIT: ${{ steps.meta.outputs.commit }}
+        run: |
+          set -euo pipefail
+          local_tag="${REGISTRY}/${IMAGE}:sha-${COMMIT}"
+          if [ "${PUSHED}" = "true" ]; then
+            # Verify the bytes the registry will actually serve, not merely the
+            # local build: re-resolve the digest this run just pushed.
+            if [ -z "${DIGEST}" ]; then
+              echo "::error::the build reported no digest, so nothing verifiable was pushed"
+              exit 1
+            fi
+            ref="${local_tag%:*}@${DIGEST}"
+            docker pull "${ref}"
+            echo "verified_image=${ref}" >> "$GITHUB_OUTPUT"
+          else
+            ref="${local_tag}"
+            echo "verified_image=${ref}" >> "$GITHUB_OUTPUT"
+          fi
+          cid="$(docker create "${ref}")"
+          trap 'docker rm -f "${cid}" >/dev/null 2>&1 || true' EXIT
+          rm -rf payload-check
+          mkdir -p payload-check
+          docker cp "${cid}:/opt/lumin" payload-check/lumin
+          mapfile -t files < <(cd payload-check/lumin && find . -type f | sed 's|^\./||' | sort)
+          printf '%s\n' "${files[@]}"
+          if [ "${#files[@]}" -ne "${PAYLOAD_FILES}" ]; then
+            echo "::error::/opt/lumin holds ${#files[@]} files, expected ${PAYLOAD_FILES}"
+            exit 1
+          fi
+          for required in manifest.json __init__.py config_flow.py translations/en.json; do
+            if [ ! -s "payload-check/lumin/${required}" ]; then
+              echo "::error::/opt/lumin/${required} is missing or empty in the image"
+              exit 1
+            fi
+          done
+          python3 - <<'PY'
+          import json
+          import pathlib
+
+          root = pathlib.Path("payload-check/lumin")
+          manifest = json.loads((root / "manifest.json").read_text())
+          assert manifest["domain"] == "lumin", manifest["domain"]
+          assert isinstance(manifest.get("version"), str) and manifest["version"]
+          for extra in ("strings.json", "translations/en.json"):
+              json.loads((root / extra).read_text())
+          print(f"/opt/lumin manifest.json OK: {manifest['domain']} {manifest['version']}")
+          PY
+          # A layer-independent fingerprint of the payload: sorted relative paths
+          # plus each file's sha256. Two builds of the same commit produce the
+          # same value even though image timestamps make the digests differ.
+          fingerprint="$(
+            cd payload-check/lumin
+            find . -type f | sort | while read -r f; do
+              printf '%s  %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "${f#./}"
+            done | sha256sum | cut -d' ' -f1
+          )"
+          echo "payload_fingerprint=${fingerprint}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the digest and the pin line
+        if: always()
+        env:
+          PUSH: ${{ steps.meta.outputs.push }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          COMMIT: ${{ steps.meta.outputs.commit }}
+          RELEASE_TAG: ${{ steps.meta.outputs.release_tag }}
+          FINGERPRINT: ${{ steps.verify.outputs.payload_fingerprint }}
+          VERIFIED_IMAGE: ${{ steps.verify.outputs.verified_image }}
+        run: |
+          set -euo pipefail
+          {
+            echo ""
+            echo "### Image"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| commit | \`${COMMIT}\` |"
+            echo "| release tag | \`${RELEASE_TAG:-none}\` |"
+            echo "| pushed | \`${PUSH}\` |"
+            echo "| digest | \`${DIGEST:-not pushed}\` |"
+            echo "| payload fingerprint | \`${FINGERPRINT:-unverified}\` |"
+            echo "| verified reference | \`${VERIFIED_IMAGE:-none}\` |"
+            echo ""
+            if [ "${PUSH}" = "true" ] && [ -n "${DIGEST}" ]; then
+              echo "Pin this digest in \`harvester-argo\` (\`workloads/homelab/home-assistant/home-assistant.yaml\`, init container \`install-lumin\`):"
+              echo ""
+              echo '```'
+              echo "${REGISTRY}/${IMAGE}@${DIGEST}"
+              echo '```'
+              echo ""
+              echo "The digest is authoritative. The \`sha-<commit>\` tag is a human-readable label only — never pull by tag."
+            else
+              echo "Pull-request build: nothing was pushed. The push path runs on \`master\`, on \`v*\` tags, and on \`workflow_dispatch\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

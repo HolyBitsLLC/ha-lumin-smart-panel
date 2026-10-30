@@ -46,3 +46,24 @@ jobs:
           git add custom_components/lumin/manifest.json
           git diff --cached --quiet || git commit -m "chore: sync manifest.json to v${VERSION}"
           git push
+
+  dispatch-image-build:
+    # release-please creates the tag with GITHUB_TOKEN, and GitHub does not run
+    # workflows for a tag push raised by GITHUB_TOKEN (ADR-0073 Amendment 1).
+    # The `on: push: tags: ["v*"]` trigger in publish-image.yaml therefore never
+    # fires for a release tag, so dispatch that workflow at the new tag
+    # explicitly. Without this, a release would publish no `vX.Y.Z` image.
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Dispatch the image build at the release tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          gh workflow run publish-image.yaml --repo "${GITHUB_REPOSITORY}" --ref "${TAG}"
