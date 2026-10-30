@@ -150,7 +150,12 @@ jobs:
         # no longer matches the pinned mirror point recorded in
         # `.github/kaniko-mirror.json`. See the header for the exact reusable
         # file/commit mirrored and the refresh procedure.
-        run: python3 scripts/check-kaniko-mirror.py
+        run: |
+          # This job runs on the shared self-hosted pool, whose `python3` is
+          # older than the hosted image's. Print it so an incompatibility is
+          # diagnosable from the log instead of from a traceback.
+          python3 --version
+          python3 scripts/check-kaniko-mirror.py
 
       - name: Assert the payload inventory in the checkout
         run: |
