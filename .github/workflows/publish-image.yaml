@@ -1,0 +1,521 @@
+name: Publish Image
+
+# Build the delivery image for this repository's Home Assistant integration
+# (`custom_components/lumin/`) and push it to
+# `harbor.dittmanfamily.com/holybitsllc/ha-lumin-smart-panel`.
+#
+# ── Where this belongs ──────────────────────────────────────────────────────
+# The workflow belongs in THIS repository: the payload is this repository's
+# source, so the build lives next to the code that defines it.
+#
+# ── Why the Kaniko step is inlined instead of calling the house reusable ────
+# The house keeps reusable workflows in PRIVATE `HolyBitsLLC/harvester-argo`
+# (`reusable-kaniko-build.yaml`). GitHub does NOT let a PUBLIC caller reference
+# a reusable workflow in a PRIVATE repository. The intended call is:
+#
+#     # uses: HolyBitsLLC/harvester-argo/.github/workflows/reusable-kaniko-build.yaml@main
+#
+# and it CANNOT resolve from this public repository. This is not a guess:
+# `harvester-argo/.github/workflows/publish-external-secrets.yaml` records the
+# same attempt from the public `HolyBitsLLC/external-secrets` fork — runs
+# 34060199000 and 34060406790 — and both failed at workflow-graph validation
+# with `jobs=0`; nothing ever ran.
+#
+# There is no public reusable-workflow host in the org: all 30+ callers of
+# `reusable-kaniko-build.yaml` are private repositories. So the reachable
+# equivalent is to inline the same Kaniko Job the reusable creates. This file
+# is a faithful copy of `reusable-kaniko-build.yaml`'s single-platform path,
+# not a new design; it drifts if the reusable changes, which is the accepted
+# cost of the public/private boundary.
+#
+# To honour the "reusable workflows live in harvester-argo" convention, the
+# org must publish `reusable-kaniko-build.yaml` in a PUBLIC repository and
+# replace the `Build and push via Kaniko Job` step below with a `uses:` call.
+#
+# ── Mirror provenance — the exact point this inline copy mirrors ────────────
+# The inlined job below mirrors ONE file at ONE commit:
+#
+#   HolyBitsLLC/harvester-argo@b5805e045d255da1d034804fe321c6207b3056f9
+#     .github/workflows/reusable-kaniko-build.yaml
+#     (blob 7a6d4928e523674c98dca44362a8e09eab487ae0, job `kaniko-build`,
+#      single-platform path — the branch without `platforms:` set)
+#
+# That commit is the newest commit touching the reusable on `main` as of
+# 2026-10-30. `.github/kaniko-mirror.json` records the same provenance plus the
+# exact Kaniko flags, images and Job skeleton this file is expected to carry.
+#
+# `scripts/check-kaniko-mirror.py` fails the `resolve` job below (and the
+# `validate` job in `ci.yaml`) when the inline Kaniko invocation no longer
+# matches that record, so drift turns a check red instead of silently shipping
+# a different builder.
+#
+# SCOPE OF THE GUARD — read this before trusting it. It proves "the inline copy
+# is unchanged since the pin". It CANNOT prove "the reusable has not changed
+# upstream": this repository is public and the reusable is private, and a
+# workflow here only ever gets a `github.token` scoped to this repository.
+# Teaching a public repo to read `harvester-argo` would require placing a
+# cross-repo credential here, which is exactly the exposure this design avoids.
+# Upstream drift is therefore detected when a human refreshes the pin, not
+# automatically.
+#
+# REFRESH PROCEDURE (do all of it in ONE commit):
+#   1. Read `reusable-kaniko-build.yaml` at the commit you are mirroring and
+#      diff its `kaniko-build` job against `Build and push via Kaniko Job`.
+#   2. Port any real difference into this file.
+#   3. Update `source_commit` / `source_blob` / `pinned_at` / `expected_flags`
+#      / `kaniko_image` / `clone_image` / `required_strings` in
+#      `.github/kaniko-mirror.json` to match the new mirror point.
+#   4. Update the commit hash in this comment block.
+#   5. Run `python3 scripts/check-kaniko-mirror.py` locally — it must pass.
+#
+# ── Runners ────────────────────────────────────────────────────────────────
+# Self-hosted, as the org requires: `self-hosted`, `linux`, `x64`,
+# `krubecible`, `holybits-shared`. These are the org-level runners registered
+# by `harvester-argo` (`RUNNER_SCOPE=org`, default runner group) and they hold
+# the in-cluster `harbor-push-secret` plus RBAC to create Kaniko Jobs in the
+# `github-actions-runners` namespace. `ubuntu-latest` is never used.
+#
+# Fork pull requests cannot reach these jobs: the triggers below are `push`,
+# `v*` tag and `workflow_dispatch` only, all of which require write access.
+# `ci.yaml` keeps fork PRs on GitHub-hosted runners for the same reason.
+#
+# ── Credentials ────────────────────────────────────────────────────────────
+# No repository secret is needed. The Kaniko Job mounts the in-cluster
+# `harbor-push-secret` (namespace `github-actions-runners`) exactly as the
+# reusable does, and the post-push verification pulls anonymously (the
+# `holybitsllc` Harbor project is public-read).
+#
+# ── Tags (ADR-0073) ────────────────────────────────────────────────────────
+# Immutable only: every build pushes `sha-<full 40-hex commit>`. A `v*` tag
+# build pushes that release tag alongside it. No floating `master`/`latest`
+# tag is ever pushed. The consumer pins the `@sha256:` manifest digest, which
+# this workflow prints to the run summary.
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Git ref to build (branch, tag or 40-hex commit SHA). Leave empty to build the ref this run is dispatched on."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: harbor.dittmanfamily.com
+  IMAGE_NAMESPACE: holybitsllc
+  IMAGE_NAME: ha-lumin-smart-panel
+  IMAGE: harbor.dittmanfamily.com/holybitsllc/ha-lumin-smart-panel
+  KANIKO_NAMESPACE: github-actions-runners
+  # The payload inventory is an invariant: the consumer fingerprints the
+  # staged tree, so a silently added or dropped file changes the component
+  # identity. `custom_components/lumin` holds 12 files today (11 modules +
+  # translations/en.json). Verified against the currently pinned image
+  # `@sha256:2efc3645…`, which holds exactly these 12 paths at `/opt/lumin`.
+  PAYLOAD_FILES: "12"
+
+concurrency:
+  group: publish-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve source commit and tags
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - krubecible
+      - holybits-shared
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      tags: ${{ steps.resolve.outputs.tags }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+    steps:
+      - name: Check out the build source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # `source_ref` is only set by workflow_dispatch; empty means "the
+          # ref this run was triggered on".
+          ref: ${{ inputs.source_ref || github.ref }}
+          fetch-depth: 1
+
+      - name: Guard the inlined Kaniko mirror against drift
+        # Fails the publish before anything is built if the inline Kaniko job
+        # no longer matches the pinned mirror point recorded in
+        # `.github/kaniko-mirror.json`. See the header for the exact reusable
+        # file/commit mirrored and the refresh procedure.
+        run: |
+          # This job runs on the shared self-hosted pool, whose `python3` is
+          # older than the hosted image's. Print it so an incompatibility is
+          # diagnosable from the log instead of from a traceback.
+          python3 --version
+          python3 scripts/check-kaniko-mirror.py
+
+      - name: Assert the payload inventory in the checkout
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find custom_components/lumin -type f | sort)
+          printf '%s\n' "${files[@]}"
+          if [ "${#files[@]}" -ne "${PAYLOAD_FILES}" ]; then
+            echo "::error::expected ${PAYLOAD_FILES} payload files under custom_components/lumin, found ${#files[@]}"
+            exit 1
+          fi
+          for required in manifest.json __init__.py config_flow.py translations/en.json; do
+            if [ ! -s "custom_components/lumin/${required}" ]; then
+              echo "::error::custom_components/lumin/${required} is missing or empty"
+              exit 1
+            fi
+          done
+          python3 - <<'PY'
+          import json
+          import pathlib
+
+          root = pathlib.Path("custom_components/lumin")
+          manifest = json.loads((root / "manifest.json").read_text())
+          assert manifest["domain"] == "lumin", manifest["domain"]
+          assert manifest["name"], "manifest.json has no name"
+          assert isinstance(manifest.get("version"), str) and manifest["version"], (
+              "manifest.json has no version"
+          )
+          assert any(r.startswith("aiohttp") for r in manifest.get("requirements", [])), (
+              manifest.get("requirements")
+          )
+          for extra in ("strings.json", "translations/en.json"):
+              json.loads((root / extra).read_text())
+          print(f"manifest.json OK: {manifest['domain']} {manifest['version']}")
+          PY
+
+      - name: Resolve the commit, tags and push mode
+        id: resolve
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          release_tag=""
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [[ "${GITHUB_REF_NAME}" == v* ]]; then
+            release_tag="${GITHUB_REF_NAME}"
+          elif [ -n "${SOURCE_REF}" ] && [[ "${SOURCE_REF}" == v* ]]; then
+            release_tag="${SOURCE_REF}"
+          fi
+          tags="sha-${sha}"
+          if [ -n "${release_tag}" ]; then
+            if ! printf '%s' "${release_tag}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+              echo "::error::release tag '${release_tag}' is not a vX.Y.Z or vX.Y.Z-suffix semver tag."
+              exit 1
+            fi
+            tags="${tags},${release_tag}"
+          fi
+          echo "Resolved source -> ${sha}"
+          echo "Tags to push: ${tags}"
+          {
+            echo "sha=${sha}"
+            echo "tags=${tags}"
+            echo "release_tag=${release_tag}"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Source"
+            echo ""
+            echo "- commit: \`${sha}\`"
+            echo "- ref: \`${GITHUB_REF}\` (${GITHUB_REF_TYPE})"
+            echo "- tags: ${tags}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build and push via Kaniko Job
+    needs: [resolve]
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - krubecible
+      - holybits-shared
+    env:
+      SOURCE_REPOSITORY: ${{ github.repository }}
+      SOURCE_REF: ${{ needs.resolve.outputs.sha }}
+    steps:
+      - name: Install kubectl
+        run: |
+          set -euo pipefail
+          if command -v kubectl >/dev/null 2>&1; then
+            kubectl version --client
+            exit 0
+          fi
+          KUBECTL_VERSION="v1.31.2"
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            aarch64|arm64) ARCH="arm64" ;;
+            x86_64|amd64)  ARCH="amd64" ;;
+          esac
+          curl -fsSL -o /usr/local/bin/kubectl \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl"
+          chmod +x /usr/local/bin/kubectl
+          kubectl version --client
+
+      - name: Verify in-cluster Harbor push secret
+        run: |
+          set -euo pipefail
+          kubectl -n "$KANIKO_NAMESPACE" get secret harbor-push-secret || {
+            echo "ERROR: harbor-push-secret not found in $KANIKO_NAMESPACE namespace."
+            exit 1
+          }
+
+      - name: Build and push via Kaniko Job
+        env:
+          TAGS: ${{ needs.resolve.outputs.tags }}
+        run: |
+          set -euo pipefail
+
+          REF_SLUG="$(printf '%s' "${SOURCE_REF}" | tr -c '[:alnum:]' '-' | cut -c1-12)"
+          job_name="kaniko-lumin-${REF_SLUG}"
+
+          cleanup() {
+            kubectl -n "$KANIKO_NAMESPACE" delete job "$job_name" --ignore-not-found=true || true
+          }
+          trap cleanup EXIT
+
+          DEST_ARGS=""
+          IFS=',' read -ra TAG_ARRAY <<< "${TAGS}"
+          for tag in "${TAG_ARRAY[@]}"; do
+            tag="$(echo "$tag" | xargs)"
+            DEST_ARGS="${DEST_ARGS}
+                      - --destination=${IMAGE}:${tag}"
+          done
+
+          # Bound the cluster-side Job so a runner that is lost mid-build does
+          # not leave an immortal Job behind (the reusable's rationale).
+          JOB_DEADLINE=$(( 1800 + 300 ))
+
+          cat <<EOF | kubectl -n "$KANIKO_NAMESPACE" apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ${job_name}
+            annotations:
+              argocd.argoproj.io/compare-options: IgnoreExtraneous
+            labels:
+              app.kubernetes.io/name: kaniko-build
+              app.kubernetes.io/instance: ha-lumin-smart-panel
+          spec:
+            backoffLimit: 0
+            ttlSecondsAfterFinished: 120
+            activeDeadlineSeconds: ${JOB_DEADLINE}
+            template:
+              spec:
+                restartPolicy: Never
+                serviceAccountName: github-actions-runner-shared
+                volumes:
+                  - name: workspace
+                    emptyDir: {}
+                  - name: docker-config
+                    secret:
+                      secretName: harbor-push-secret
+                      items:
+                        - key: .dockerconfigjson
+                          path: config.json
+                initContainers:
+                  - name: clone-repo
+                    image: docker.io/alpine/git:2.47.2
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                    resources:
+                      requests:
+                        cpu: 100m
+                        memory: 128Mi
+                      limits:
+                        cpu: 500m
+                        memory: 512Mi
+                    command: ["sh", "-lc"]
+                    args:
+                      - |
+                        set -euo pipefail
+                        git clone --depth=1 "https://github.com/${SOURCE_REPOSITORY}.git" /workspace/src
+                        cd /workspace/src
+                        git fetch --depth=1 origin "${SOURCE_REF}"
+                        git checkout FETCH_HEAD
+                    volumeMounts:
+                      - name: workspace
+                        mountPath: /workspace
+                containers:
+                  - name: kaniko
+                    image: gcr.io/kaniko-project/executor:v1.23.2
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                    resources:
+                      requests:
+                        cpu: 500m
+                        memory: 1Gi
+                      limits:
+                        cpu: "4"
+                        memory: "8Gi"
+                    args:
+                      - --context=dir:///workspace/src
+                      - --dockerfile=/workspace/src/Dockerfile
+                      - --snapshot-mode=redo
+                      - --cache=true
+                      - --cache-repo=harbor.dittmanfamily.com/holybitsllc/kaniko-cache/ha-lumin-smart-panel
+                      - --cache-ttl=336h${DEST_ARGS}
+                    volumeMounts:
+                      - name: workspace
+                        mountPath: /workspace
+                      - name: docker-config
+                        mountPath: /kaniko/.docker
+                        readOnly: true
+          EOF
+
+          # Bound the wait for Pod placement and report the scheduler's verbatim
+          # refusal instead of spinning for the whole build timeout.
+          pod_name=""
+          pod_scheduled=""
+          for _ in $(seq 1 120); do
+            pod_name="$(kubectl -n "$KANIKO_NAMESPACE" get pods \
+              -l "job-name=${job_name}" \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+            if [ -n "$pod_name" ]; then
+              pod_scheduled="$(kubectl -n "$KANIKO_NAMESPACE" get pod "$pod_name" \
+                -o jsonpath='{.status.conditions[?(@.type=="PodScheduled")].status}' 2>/dev/null || true)"
+              [ "$pod_scheduled" = "True" ] && break
+            fi
+            sleep 5
+          done
+          if [ "$pod_scheduled" != "True" ]; then
+            echo "::error::${job_name}: the build Pod was not scheduled after 600s. The image was never built."
+            kubectl -n "$KANIKO_NAMESPACE" get events \
+              --field-selector "reason=FailedScheduling" \
+              --sort-by=.lastTimestamp || true
+            exit 1
+          fi
+
+          deadline=$((SECONDS + 1800))
+          while true; do
+            if kubectl -n "$KANIKO_NAMESPACE" wait --for=condition=complete --timeout=5s "job/${job_name}"; then
+              break
+            fi
+            failed_count="$(kubectl -n "$KANIKO_NAMESPACE" get job "$job_name" -o jsonpath='{.status.failed}' || echo 0)"
+            if [ "${failed_count:-0}" != "0" ]; then
+              echo "Kaniko job failed. Dumping logs."
+              kubectl -n "$KANIKO_NAMESPACE" logs "job/${job_name}" --all-containers=true || true
+              exit 1
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "Kaniko job exceeded 1800s build timeout. Dumping logs."
+              kubectl -n "$KANIKO_NAMESPACE" logs "job/${job_name}" --all-containers=true || true
+              exit 1
+            fi
+            sleep 10
+          done
+          kubectl -n "$KANIKO_NAMESPACE" logs "job/${job_name}" --all-containers=true
+
+  digest:
+    name: Resolve digest and verify /opt/lumin
+    needs: [resolve, build]
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - krubecible
+      - holybits-shared
+    outputs:
+      digest: ${{ steps.digest.outputs.digest }}
+      fingerprint: ${{ steps.verify.outputs.fingerprint }}
+    steps:
+      - name: Install crane
+        run: |
+          set -euo pipefail
+          if command -v crane >/dev/null 2>&1; then
+            crane version
+            exit 0
+          fi
+          CRANE_VERSION="v0.20.3"
+          HOST_ARCH="$(uname -m)"
+          case "$HOST_ARCH" in
+            aarch64|arm64) HOST_ARCH="arm64" ;;
+            x86_64|amd64)  HOST_ARCH="x86_64" ;;
+          esac
+          curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_${HOST_ARCH}.tar.gz" \
+            | tar -xzf - -C /usr/local/bin crane
+          chmod +x /usr/local/bin/crane
+
+      - name: Resolve the pushed manifest digest
+        id: digest
+        env:
+          TAGS: ${{ needs.resolve.outputs.tags }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # The immutable tag is the first one in the list.
+          primary="${TAGS%%,*}"
+          digest="$(crane digest "${IMAGE}:${primary}")"
+          echo "Resolved ${IMAGE}:${primary} -> ${digest}"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          {
+            echo ""
+            echo "### Image"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| commit | \`${SHA}\` |"
+            echo "| tags | \`${TAGS}\` |"
+            echo "| digest | \`${digest}\` |"
+            echo ""
+            echo "Pin this digest in \`harvester-argo\`:"
+            echo ""
+            echo '```'
+            echo "${IMAGE}@${digest}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify /opt/lumin in the pushed image
+        id: verify
+        env:
+          DIGEST: ${{ steps.digest.outputs.digest }}
+        run: |
+          set -euo pipefail
+          ref="${IMAGE}@${DIGEST}"
+          rm -rf payload-check
+          mkdir -p payload-check
+          crane export "${ref}" - | tar -x -C payload-check
+          mapfile -t files < <(cd payload-check/opt/lumin && find . -type f | sed 's|^\./||' | sort)
+          printf '%s\n' "${files[@]}"
+          if [ "${#files[@]}" -ne "${PAYLOAD_FILES}" ]; then
+            echo "::error::/opt/lumin holds ${#files[@]} files, expected ${PAYLOAD_FILES}"
+            exit 1
+          fi
+          for required in manifest.json __init__.py config_flow.py translations/en.json; do
+            if [ ! -s "payload-check/opt/lumin/${required}" ]; then
+              echo "::error::/opt/lumin/${required} is missing or empty in the image"
+              exit 1
+            fi
+          done
+          python3 - <<'PY'
+          import json
+          import pathlib
+
+          root = pathlib.Path("payload-check/opt/lumin")
+          manifest = json.loads((root / "manifest.json").read_text())
+          assert manifest["domain"] == "lumin", manifest["domain"]
+          assert isinstance(manifest.get("version"), str) and manifest["version"]
+          for extra in ("strings.json", "translations/en.json"):
+              json.loads((root / extra).read_text())
+          print(f"/opt/lumin manifest.json OK: {manifest['domain']} {manifest['version']}")
+          PY
+          # Layer-independent payload fingerprint: sorted relative paths plus
+          # each file's sha256. The same tree yields the same value even though
+          # image timestamps make the manifest digests differ.
+          fingerprint="$(
+            cd payload-check/opt/lumin
+            find . -type f | sort | while read -r f; do
+              printf '%s  %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "${f#./}"
+            done | sha256sum | cut -d' ' -f1
+          )"
+          echo "fingerprint=${fingerprint}" >> "$GITHUB_OUTPUT"
+          {
+            echo ""
+            echo "| payload fingerprint | \`${fingerprint}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

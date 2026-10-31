@@ -18,11 +18,12 @@ Cloud API (api.luminsmart.com):
 from __future__ import annotations
 
 import logging
+import ssl
 import time
-from typing import Any, Callable, Coroutine
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 import aiohttp
-import ssl
 
 _LOGGER = logging.getLogger(__name__)
 

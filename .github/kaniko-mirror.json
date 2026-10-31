@@ -1,0 +1,37 @@
+{
+  "comment": [
+    "Pinned mirror point of the Kaniko job inlined in .github/workflows/publish-image.yaml.",
+    "Every field below is written by hand from the reusable at source_commit; see the",
+    "'Mirror provenance' block at the top of publish-image.yaml for the refresh procedure.",
+    "scripts/check-kaniko-mirror.py compares the workflow against this file and fails on drift."
+  ],
+  "mirror": {
+    "source_repository": "HolyBitsLLC/harvester-argo",
+    "source_path": ".github/workflows/reusable-kaniko-build.yaml",
+    "source_ref": "main",
+    "source_commit": "b5805e045d255da1d034804fe321c6207b3056f9",
+    "source_blob": "7a6d4928e523674c98dca44362a8e09eab487ae0",
+    "mirrored_job": "kaniko-build",
+    "mirrored_path": "single-platform",
+    "pinned_at": "2026-10-30",
+    "kaniko_image": "gcr.io/kaniko-project/executor:v1.23.2",
+    "clone_image": "docker.io/alpine/git:2.47.2",
+    "expected_flags": [
+      "--context=dir:///workspace/src",
+      "--dockerfile=/workspace/src/Dockerfile",
+      "--snapshot-mode=redo",
+      "--cache=true",
+      "--cache-repo=harbor.dittmanfamily.com/holybitsllc/kaniko-cache/ha-lumin-smart-panel",
+      "--cache-ttl=336h",
+      "--destination=${IMAGE}:${tag}"
+    ],
+    "required_strings": [
+      "kind: Job",
+      "backoffLimit: 0",
+      "ttlSecondsAfterFinished: 120",
+      "serviceAccountName: github-actions-runner-shared",
+      "secretName: harbor-push-secret",
+      "- key: .dockerconfigjson"
+    ]
+  }
+}
