@@ -29,7 +29,10 @@ jobs:
     runs-on: ${{ github.event_name == 'push' && fromJSON('["self-hosted", "linux", "x64", "krubecible", "holybits-shared"]') || 'ubuntu-latest' }}
     steps:
       - name: HACS validation
-        uses: hacs/action@main
+        # Pinned to the 22.5.0 release commit, like every other action in this
+        # repo: `@main` would let the validator change under us, which is the
+        # same unpinned-remote problem this workflow exists to catch.
+        uses: hacs/action@d556e736723344f83838d08488c983a15381059a # 22.5.0
         with:
           category: integration
           # `brands` and `topics` are requirements for inclusion in the HACS
