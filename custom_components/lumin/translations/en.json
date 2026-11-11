@@ -12,7 +12,14 @@
       },
       "token": {
         "title": "Lumin Account Authentication",
-        "description": "Paste your token data from the Lumin portal.\n\n1. Go to {portal_url} and log in\n2. Open browser DevTools (F12)\n3. Go to Application → Local Storage → portal.luminsmart.com\n4. Click the auth entry and copy the entire Value field\n\nYou can paste the full JSON blob or just the access_token string. The refresh token (included in the JSON) keeps the integration authenticated indefinitely.",
+        "description": "Paste your token data from the Lumin portal.\n\n1. Go to {portal_url} and log in\n2. Open browser DevTools (F12)\n3. Go to Application → Local Storage → app.luminsmart.com\n4. Click the auth entry and copy the entire Value field\n\nYou can paste the full JSON blob or just the access_token string. The refresh token contained in the blob is the durable credential: every access token is refreshed automatically, including after a Home Assistant restart, so this is normally a one-time setup step.",
+        "data": {
+          "token_data": "Token Data (paste JSON blob or access token)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate Lumin",
+        "description": "The stored Lumin token can no longer be refreshed, so Home Assistant needs fresh token data. Your panel selection and IP addresses are kept.\n\n1. Go to {portal_url} and log in\n2. Open browser DevTools (F12)\n3. Go to Application → Local Storage → app.luminsmart.com\n4. Click the auth entry and copy the entire Value field\n\nYou can paste the full JSON blob or just the access_token string.",
         "data": {
           "token_data": "Token Data (paste JSON blob or access token)"
         }
@@ -44,6 +51,11 @@
       "no_panels": "No panels found on this Lumin account.",
       "cannot_connect": "Cannot connect to the panel at the specified IP address.",
       "unknown": "An unexpected error occurred."
+    },
+    "abort": {
+      "reauth_successful": "Re-authentication was successful.",
+      "reauth_failed": "Could not find the Lumin config entry to update.",
+      "already_configured": "This panel is already configured."
     }
   }
 }

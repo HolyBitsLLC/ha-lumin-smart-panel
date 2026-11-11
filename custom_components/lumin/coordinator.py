@@ -7,9 +7,15 @@ from datetime import timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import LuminApiClient, LuminAuthError, LuminConnectionError
+from .api import (
+    LuminApiClient,
+    LuminAuthError,
+    LuminConnectionError,
+    LuminReauthRequired,
+)
 from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
 from .websocket import LuminWebSocketClient
 
@@ -106,6 +112,13 @@ class LuminDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 panel_data["available"] = True
                 panel.circuits = circuits
                 panel.available = True
+            except LuminReauthRequired as err:
+                # The refresh token is dead. Stop polling a grant that cannot
+                # succeed and let Home Assistant start a reauth flow.
+                raise ConfigEntryAuthFailed(
+                    "The Lumin refresh token is no longer valid; "
+                    "fresh token data is required"
+                ) from err
             except (LuminConnectionError, LuminAuthError) as err:
                 panel.available = False
                 _LOGGER.debug("Update failed for panel %s: %s", guid, err)

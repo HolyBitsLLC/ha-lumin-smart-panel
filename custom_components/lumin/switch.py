@@ -8,10 +8,12 @@ from typing import Any
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .api import LuminReauthRequired
 from .const import DOMAIN
 from .coordinator import LuminDataCoordinator
 
@@ -97,17 +99,26 @@ class LuminCircuitSwitch(CoordinatorEntity[LuminDataCoordinator], SwitchEntity):
         return self.coordinator.is_panel_available(self._panel.guid)
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        await self.coordinator.client.switch_circuit(
-            self._panel, self._circuit_id, True
-        )
+        await self._async_switch(True)
         self._attr_is_on = True
         self.async_write_ha_state()
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        await self.coordinator.client.switch_circuit(
-            self._panel, self._circuit_id, False
-        )
+        await self._async_switch(False)
         self._attr_is_on = False
         self.async_write_ha_state()
         await self.coordinator.async_request_refresh()
+
+    async def _async_switch(self, turn_on: bool) -> None:
+        try:
+            await self.coordinator.client.switch_circuit(
+                self._panel, self._circuit_id, turn_on
+            )
+        except LuminReauthRequired as err:
+            # Surface it instead of silently doing nothing; HA will also have
+            # started a reauth flow from the coordinator's ConfigEntryAuthFailed.
+            raise HomeAssistantError(
+                "Lumin re-authentication required: the stored refresh token is "
+                "no longer valid"
+            ) from err
