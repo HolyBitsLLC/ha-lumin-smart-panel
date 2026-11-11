@@ -13,8 +13,9 @@ Local-first Home Assistant integration for [Lumin Smart Panels](https://www.lumi
 - **Energy dashboard ready**: Per-circuit and whole-panel kWh sensors with `total_increasing` state class for HA's Energy dashboard
 - **Multi-panel support**: Discover and manage multiple Lumin Smart Panels from one integration
 - **Circuit control**: Toggle individual circuit relays on/off
-- **Automatic token refresh**: Auth0 refresh token keeps the integration authenticated indefinitely — no manual re-auth needed
-- **Easy setup**: Paste the entire Local Storage JSON blob from the Lumin portal — the integration extracts tokens automatically
+- **Automatic token refresh**: the stored Auth0 refresh token is exchanged for a new access token before expiry, on any 401, and at startup — so a Home Assistant restart after downtime recovers without re-entering anything
+- **Reauth flow**: if the refresh token itself is revoked (e.g. the Lumin password changed), Home Assistant prompts once for fresh token data instead of silently degrading
+- **Easy setup**: paste the entire Local Storage JSON blob from the Lumin portal — the integration extracts tokens automatically
 
 ## Entities Created
 
@@ -53,13 +54,19 @@ Local-first Home Assistant integration for [Lumin Smart Panels](https://www.lumi
 
 ### Getting Your Token Data
 
-1. Go to https://portal.luminsmart.com and log in
+1. Go to https://app.luminsmart.com and log in
 2. Open browser DevTools (F12)
-3. Go to **Application** → **Local Storage** → `portal.luminsmart.com`
+3. Go to **Application** → **Local Storage** → `app.luminsmart.com`
 4. Click the auth entry and **copy the entire Value field** (Ctrl+A, Ctrl+C)
 5. Paste it into the integration's setup form — the integration extracts the access token and refresh token automatically
 
 > **Tip**: You can paste the full JSON blob (5000+ chars), a truncated blob, the inner `body` object, or just a raw JWT access token. The parser handles all formats.
+
+This is normally a **one-time** step. The refresh token in the blob is the durable
+credential: the integration uses it to mint new access tokens proactively, on any
+401, and at every startup, so a Home Assistant restart or a long outage recovers
+by itself. See [Token lifecycle](#token-lifecycle) for the one case that still
+needs a human.
 
 ### Installation
 
@@ -103,7 +110,47 @@ Home Assistant
 
 - **Local-first**: Always tries the local panel API first, falls back to cloud if unreachable
 - **WebSocket reconnect**: Auto-reconnects with exponential backoff (2s → 60s)
-- **Token lifecycle**: Proactively refreshes Auth0 tokens 5 minutes before expiry; persists refreshed tokens to the config entry
+- **Token lifecycle**: Refreshes the Auth0 access token 5 minutes before expiry, on any 401, and once at startup; the absolute expiry is persisted in the config entry so a restart knows the token is stale
+
+## Token lifecycle
+
+```
+config entry (.storage)
+  access_token   short-lived JWT      ← refreshed often
+  refresh_token  durable grant        ← rotated on every refresh, persisted
+  token_expires_at  absolute epoch    ← survives a restart
+```
+
+1. **At startup** the integration compares the persisted expiry (or the access
+   token's own `exp` claim) against the clock. If it is stale it refreshes once,
+   before the first poll. This is what makes an HA restart self-healing.
+2. **Before expiry** a refresh happens up to 5 minutes early.
+3. **On a 401** from either the local panel or the cloud API, the request is
+   retried once with a freshly refreshed token. Concurrent refreshes are
+   serialised, so Auth0's refresh-token rotation never sees a reused token.
+4. **If the refresh token is dead** (`invalid_grant`, e.g. the Lumin account
+   password changed) the coordinator raises `ConfigEntryAuthFailed`, Home
+   Assistant raises a Repairs issue and starts a reauth flow, and only that
+   prompt asks for new token data.
+
+### Why not username/password?
+
+Deriving the token from the Lumin email/password is not possible without a human
+solving a CAPTCHA:
+
+- Auth0's `password` and `password-realm` grants are **disabled** for both Lumin
+  clients (`eKr5fjYckpRJbP3iqywCZXapDZbB3Kgs`, `un7psu3o3AZdd1cO1fcFSwqsQQgeVIXD`) —
+  `POST https://auth.luminsmart.io/oauth/token` answers
+  `403 {"error":"unauthorized_client","error_description":"Grant type 'password' not allowed for the client."}`.
+- The only credential login is the portal's Auth0 login page, which always
+  renders and submits a bot-detection CAPTCHA
+  (`webAuth.renderCaptcha(...)` / `captcha: this.captcha.getValue()` in
+  `https://auth.luminsmart.io/login`). Posting credentials without one returns
+  `401 {"code":"invalid_captcha"}`.
+
+So the integration deliberately does not store the account password. The
+refresh token is the machine credential, and the reauth flow is the fallback
+when Lumin revokes it.
 
 ## Panel Info
 
@@ -115,8 +162,12 @@ Home Assistant
 
 ## Security
 
-- Tokens are stored in HA's encrypted config entry storage — never in plaintext files
-- Auth0 refresh tokens allow indefinite authentication without storing passwords
+- Tokens live in the Home Assistant config entry, which is plain JSON in
+  `.storage/core.config_entries` on the config volume — it is not encrypted, so
+  treat the HA `/config` volume as credential material (it already holds every
+  other integration's secrets)
+- The Lumin account password is never stored; the Auth0 refresh token is the
+  machine credential and is rotated on every refresh
 - Local WebSocket connections (port 8085) do not require authentication
 - The integration uses self-signed TLS for local panel communication (certificate verification disabled for local connections only)
 - See [SECURITY.md](SECURITY.md) for vulnerability reporting

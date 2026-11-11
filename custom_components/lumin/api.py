@@ -17,6 +17,9 @@ Cloud API (api.luminsmart.com):
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import json
 import logging
 import ssl
 import time
@@ -30,20 +33,72 @@ _LOGGER = logging.getLogger(__name__)
 # Buffer before actual expiry to trigger proactive refresh (5 minutes)
 TOKEN_EXPIRY_BUFFER = 300
 
+# Auth0 errors that mean the refresh token is *dead*, not merely that the call
+# failed. Only a fresh grant from a human can recover from these.
+REFRESH_TOKEN_DEAD_ERRORS = frozenset(
+    {"invalid_grant", "invalid_client", "unauthorized_client"}
+)
+
 
 class LuminAuthError(Exception):
     """Authentication error."""
+
+
+class LuminReauthRequired(LuminAuthError):
+    """The stored grant can no longer be refreshed; a human must re-authenticate."""
 
 
 class LuminConnectionError(Exception):
     """Connection error."""
 
 
-class LuminTokenManager:
-    """Manages Auth0 token lifecycle — refresh before expiry, retry on 401.
+def jwt_expiry(token: str) -> float | None:
+    """Return the `exp` claim of a JWT as epoch seconds, or None.
 
-    Auth0 refresh endpoint: POST https://{domain}/oauth/token
-    with grant_type=refresh_token, client_id, refresh_token.
+    The signature is deliberately not verified: the value is only used to
+    schedule a refresh, never to authorise a request.
+    """
+    try:
+        payload_segment = token.split(".")[1]
+    except (AttributeError, IndexError):
+        return None
+
+    padded = payload_segment + "=" * (-len(payload_segment) % 4)
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(padded))
+    except (ValueError, TypeError):
+        return None
+
+    exp = payload.get("exp") if isinstance(payload, dict) else None
+    if isinstance(exp, (int, float)):
+        return float(exp)
+    return None
+
+
+def _auth0_error_code(body: str) -> str:
+    """Extract the OAuth `error` code from an Auth0 error body."""
+    try:
+        parsed = json.loads(body)
+    except (ValueError, TypeError):
+        return ""
+    if isinstance(parsed, dict):
+        code = parsed.get("error")
+        if isinstance(code, str):
+            return code
+    return ""
+
+
+class LuminTokenManager:
+    """Manages the Auth0 token lifecycle for the Lumin cloud API.
+
+    Auth0 refresh endpoint: POST https://{domain}/oauth/token with
+    grant_type=refresh_token, client_id, refresh_token.
+
+    The access token is short-lived; the refresh token is the durable
+    credential. Expiry is kept as an absolute epoch timestamp (not a monotonic
+    offset) so it can be stored in the config entry and still be meaningful
+    after a Home Assistant restart, which is what lets a restart recover the
+    session on its own.
     """
 
     def __init__(
@@ -53,7 +108,8 @@ class LuminTokenManager:
         refresh_token: str,
         auth0_domain: str,
         client_id: str,
-        on_tokens_refreshed: Callable[[str, str], Coroutine] | None = None,
+        on_tokens_refreshed: Callable[[str, str, float], Coroutine] | None = None,
+        expires_at: float | None = None,
     ) -> None:
         self._session = session
         self._access_token = access_token
@@ -61,8 +117,10 @@ class LuminTokenManager:
         self._auth0_domain = auth0_domain
         self._client_id = client_id
         self._on_tokens_refreshed = on_tokens_refreshed
-        self._expires_at: float = 0  # unknown until first refresh
-        self._refreshing = False
+        # Prefer the persisted expiry; fall back to the token's own `exp` claim.
+        # 0 means "unknown" — assume valid until a request says otherwise.
+        self._expires_at: float = expires_at or jwt_expiry(access_token) or 0.0
+        self._refresh_lock = asyncio.Lock()
 
     @property
     def access_token(self) -> str:
@@ -72,16 +130,40 @@ class LuminTokenManager:
     def refresh_token(self) -> str:
         return self._refresh_token
 
+    @property
+    def expires_at(self) -> float:
+        """Absolute epoch expiry of the current access token (0 = unknown)."""
+        return self._expires_at
+
     def set_expiry(self, expires_in: int) -> None:
-        """Set token expiry from expires_in seconds."""
-        self._expires_at = time.monotonic() + expires_in
+        """Set absolute expiry from an `expires_in` seconds value."""
+        if expires_in and expires_in > 0:
+            self._expires_at = time.time() + expires_in
 
     @property
     def token_expired(self) -> bool:
-        """True if the token is expired or will expire within the buffer."""
+        """True if the token is expired or expires within the buffer."""
         if self._expires_at == 0:
-            return False  # unknown expiry, assume valid until 401
-        return time.monotonic() >= (self._expires_at - TOKEN_EXPIRY_BUFFER)
+            return False  # unknown expiry, assume valid until a 401
+        return time.time() >= (self._expires_at - TOKEN_EXPIRY_BUFFER)
+
+    async def async_startup_refresh(self) -> None:
+        """Make the stored grant usable before the first data poll.
+
+        This is the path that recovers from a Home Assistant restart: the
+        persisted access token is usually older than its lifetime, but the
+        refresh token is not, so a single refresh restores the session with no
+        human action.
+        """
+        if not self.token_expired:
+            return
+
+        if not self._refresh_token:
+            raise LuminReauthRequired(
+                "The stored access token has expired and no refresh token was saved"
+            )
+
+        await self.async_refresh()
 
     async def ensure_valid_token(self) -> str:
         """Return a valid access token, refreshing proactively if needed."""
@@ -89,49 +171,85 @@ class LuminTokenManager:
             await self.async_refresh()
         return self._access_token
 
-    async def async_refresh(self) -> None:
-        """Exchange refresh token for a new access token via Auth0."""
-        if self._refreshing:
-            return
-        if not self._refresh_token:
-            raise LuminAuthError("No refresh token available")
+    async def async_refresh(self, stale_token: str | None = None) -> None:
+        """Exchange the refresh token for a new access token via Auth0.
 
-        self._refreshing = True
-        try:
+        Args:
+            stale_token: the access token the caller found unusable. When it no
+                longer matches the current token another task has already
+                refreshed, so this call returns without burning a second
+                refresh (Auth0 rotates refresh tokens and treats reuse as an
+                attack).
+
+        Raises:
+            LuminReauthRequired: the refresh token is dead (reuse detected,
+                revoked, or password changed). A human must re-authenticate.
+            LuminAuthError: the refresh failed for a retryable reason.
+            LuminConnectionError: the refresh could not reach Auth0.
+        """
+        async with self._refresh_lock:
+            if stale_token is not None and self._access_token != stale_token:
+                return  # another task already replaced this token
+
+            if not self._refresh_token:
+                raise LuminReauthRequired("No refresh token available")
+
             url = f"https://{self._auth0_domain}/oauth/token"
             payload = {
                 "grant_type": "refresh_token",
                 "client_id": self._client_id,
                 "refresh_token": self._refresh_token,
             }
-            async with self._session.post(
-                url, json=payload, timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp:
-                if resp.status != 200:
+            try:
+                async with self._session.post(
+                    url, json=payload, timeout=aiohttp.ClientTimeout(total=15)
+                ) as resp:
+                    status = resp.status
                     body = await resp.text()
-                    _LOGGER.error("Token refresh failed (%d): %s", resp.status, body)
-                    raise LuminAuthError(
-                        f"Token refresh failed with status {resp.status}"
+            except (aiohttp.ClientError, TimeoutError) as err:
+                raise LuminConnectionError(
+                    f"Could not reach the Auth0 token endpoint: {err}"
+                ) from err
+
+            if status != 200:
+                code = _auth0_error_code(body)
+                _LOGGER.error(
+                    "Token refresh failed (%d, %s): %s",
+                    status,
+                    code or "no error code",
+                    body[:200],
+                )
+                if code in REFRESH_TOKEN_DEAD_ERRORS:
+                    raise LuminReauthRequired(
+                        "The Lumin refresh token is no longer valid "
+                        f"(Auth0: {code}); fresh token data is required"
                     )
-                data = await resp.json()
+                raise LuminAuthError(f"Token refresh failed with status {status}")
+
+            try:
+                data = json.loads(body)
+            except (ValueError, TypeError) as err:
+                raise LuminAuthError("Token refresh returned a malformed body") from err
 
             new_access = data.get("access_token")
             new_refresh = data.get("refresh_token", self._refresh_token)
-            expires_in = data.get("expires_in", 86400)
+            expires_in = data.get("expires_in", 0)
 
             if not new_access:
                 raise LuminAuthError("Token refresh returned no access_token")
 
             self._access_token = new_access
             self._refresh_token = new_refresh
-            self._expires_at = time.monotonic() + expires_in
-            _LOGGER.debug("Token refreshed, expires in %ds", expires_in)
+            self.set_expiry(expires_in)
+            if self._expires_at == 0:
+                # No `expires_in` in the response; fall back to the JWT claim.
+                self._expires_at = jwt_expiry(new_access) or 0.0
+            _LOGGER.debug("Token refreshed, expires in %ss", expires_in)
 
             if self._on_tokens_refreshed:
-                await self._on_tokens_refreshed(new_access, new_refresh)
-
-        finally:
-            self._refreshing = False
+                await self._on_tokens_refreshed(
+                    new_access, new_refresh, self._expires_at
+                )
 
 
 class LuminPanel:
@@ -405,16 +523,38 @@ class LuminApiClient:
             if new_token != self._token:
                 self.update_token(new_token)
 
-    async def async_handle_auth_error(self) -> bool:
-        """Attempt token refresh on 401. Returns True if refresh succeeded."""
+    async def async_handle_auth_error(self, stale_token: str | None = None) -> bool:
+        """Refresh after a 401. Returns True when a retry is worth attempting.
+
+        Raises:
+            LuminReauthRequired: the refresh token is dead and Home Assistant
+                has to ask the user for fresh token data.
+        """
         if not self._token_manager or not self._token_manager.refresh_token:
             return False
         try:
-            await self._token_manager.async_refresh()
-            self.update_token(self._token_manager.access_token)
-            return True
-        except LuminAuthError:
+            await self._token_manager.async_refresh(
+                stale_token if stale_token is not None else self._token
+            )
+        except LuminReauthRequired:
+            raise
+        except (LuminAuthError, LuminConnectionError) as err:
+            _LOGGER.debug("Token refresh attempt failed: %s", err)
             return False
+        self.update_token(self._token_manager.access_token)
+        return True
+
+    async def _call_with_reauth(self, call: Callable[[], Coroutine]) -> Any:
+        """Run a request, and on a 401 refresh once and retry it."""
+        stale_token = self._token
+        try:
+            return await call()
+        except LuminAuthError:
+            # Passing the token this request actually used lets a concurrent
+            # refresh win without spending a second (rotating) refresh.
+            if not await self.async_handle_auth_error(stale_token):
+                raise
+            return await call()
 
     @property
     def panels(self) -> dict[str, LuminPanel]:
@@ -434,28 +574,22 @@ class LuminApiClient:
         local = self._local_clients.get(panel.guid)
         if local:
             try:
-                circuits = await local.get_circuits()
+                circuits = await self._call_with_reauth(local.get_circuits)
                 panel.available = True
                 return circuits
-            except LuminAuthError:
-                if await self.async_handle_auth_error():
-                    try:
-                        circuits = await local.get_circuits()
-                        panel.available = True
-                        return circuits
-                    except (LuminConnectionError, LuminAuthError) as err:
-                        _LOGGER.debug("Local API retry failed for %s: %s", panel.guid, err)
-                        panel.available = False
-                else:
-                    raise
-            except LuminConnectionError as err:
+            except LuminReauthRequired:
+                raise
+            except (LuminConnectionError, LuminAuthError) as err:
                 _LOGGER.debug("Local API failed for %s: %s", panel.guid, err)
                 panel.available = False
 
         if self._use_cloud_fallback and panel.lsp_id:
             try:
-                circuits = await self._cloud_client.get_circuits(panel.lsp_id)
-                return circuits
+                return await self._call_with_reauth(
+                    lambda: self._cloud_client.get_circuits(panel.lsp_id)
+                )
+            except LuminReauthRequired:
+                raise
             except (LuminConnectionError, LuminAuthError) as err:
                 _LOGGER.warning(
                     "Cloud fallback also failed for %s: %s", panel.guid, err
@@ -472,17 +606,25 @@ class LuminApiClient:
         local = self._local_clients.get(panel.guid)
         if local:
             try:
-                result = await local.switch_circuit(circuit_id, turn_on)
+                result = await self._call_with_reauth(
+                    lambda: local.switch_circuit(circuit_id, turn_on)
+                )
                 panel.available = True
                 return result
+            except LuminReauthRequired:
+                raise
             except (LuminConnectionError, LuminAuthError) as err:
                 _LOGGER.debug("Local switch failed for %s: %s", panel.guid, err)
 
         if self._use_cloud_fallback and panel.lsp_id:
             try:
-                return await self._cloud_client.switch_circuit(
-                    panel.lsp_id, circuit_id, turn_on
+                return await self._call_with_reauth(
+                    lambda: self._cloud_client.switch_circuit(
+                        panel.lsp_id, circuit_id, turn_on
+                    )
                 )
+            except LuminReauthRequired:
+                raise
             except (LuminConnectionError, LuminAuthError) as err:
                 _LOGGER.error(
                     "Cloud switch also failed for %s: %s", panel.guid, err
@@ -494,7 +636,11 @@ class LuminApiClient:
         """Get full panel status (cloud only — local /status returns HTML)."""
         if self._use_cloud_fallback and panel.lsp_id:
             try:
-                return await self._cloud_client.get_panel_status(panel.lsp_id)
+                return await self._call_with_reauth(
+                    lambda: self._cloud_client.get_panel_status(panel.lsp_id)
+                )
+            except LuminReauthRequired:
+                raise
             except (LuminConnectionError, LuminAuthError) as err:
                 _LOGGER.debug("Cloud status failed for %s: %s", panel.guid, err)
         return {}

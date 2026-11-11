@@ -25,6 +25,10 @@ CONF_PANEL_NAME = "panel_name"
 CONF_PANEL_LSP_ID = "lsp_id"
 CONF_ACCESS_TOKEN = "access_token"
 CONF_REFRESH_TOKEN = "refresh_token"
+# Absolute epoch expiry of the stored access token. Persisted so a Home
+# Assistant restart can tell whether the token is stale without waiting for a
+# 401, and so the refresh decision survives the restart.
+CONF_TOKEN_EXPIRES_AT = "token_expires_at"
 CONF_USE_CLOUD_FALLBACK = "use_cloud_fallback"
 
 # Platforms

@@ -27,6 +27,7 @@ from .api import (
     LuminConnectionError,
     LuminLocalClient,
     LuminPanel,
+    jwt_expiry,
 )
 from .const import (
     AUTH0_DOMAIN,
@@ -36,6 +37,7 @@ from .const import (
     CONF_PANEL_NAME,
     CONF_PANELS,
     CONF_REFRESH_TOKEN,
+    CONF_TOKEN_EXPIRES_AT,
     CONF_USE_CLOUD_FALLBACK,
     DOMAIN,
 )
@@ -51,6 +53,7 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         self._access_token: str | None = None
         self._refresh_token: str | None = None
+        self._expires_at: float | None = None
         self._panels: list[dict[str, Any]] = []
         self._selected_panels: list[dict[str, Any]] = []
 
@@ -103,6 +106,7 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         _LOGGER.debug("Found %d panels", len(panels))
                         self._access_token = token
                         self._refresh_token = refresh
+                        self._expires_at = jwt_expiry(token)
                         self._panels = panels
                         return await self.async_step_select_panels()
                 except LuminAuthError as err:
@@ -128,6 +132,71 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={
                 "auth0_domain": AUTH0_DOMAIN,
                 "portal_url": "https://portal.luminsmart.com",
+            },
+        )
+
+    async def async_step_reauth(
+        self, entry_data: dict[str, Any]
+    ) -> config_entries.ConfigFlowResult:
+        """Start reauth when the stored grant can no longer be refreshed.
+
+        Home Assistant calls this after the coordinator raises
+        `ConfigEntryAuthFailed`. The panel list and IP addresses are preserved;
+        only the token data is replaced.
+        """
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Ask for fresh token data and swap it into the existing entry."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            raw = user_input.get("token_data", "").strip()
+            token, refresh = self._parse_token_input(raw)
+
+            if not token:
+                errors["base"] = "invalid_token_format"
+            else:
+                session = async_get_clientsession(self.hass)
+                try:
+                    panels = await LuminCloudClient(session, token).get_panels()
+                except LuminAuthError:
+                    errors["base"] = "invalid_auth"
+                except LuminConnectionError:
+                    errors["base"] = "cannot_connect"
+                else:
+                    entry = self.hass.config_entries.async_get_entry(
+                        self.context["entry_id"]
+                    )
+                    if entry is None:
+                        return self.async_abort(reason="reauth_failed")
+                    if not panels:
+                        errors["base"] = "no_panels"
+                    else:
+                        return self.async_update_reload_and_abort(
+                            entry,
+                            data_updates={
+                                CONF_ACCESS_TOKEN: token,
+                                CONF_REFRESH_TOKEN: refresh,
+                                CONF_TOKEN_EXPIRES_AT: jwt_expiry(token) or 0.0,
+                            },
+                            reason="reauth_successful",
+                        )
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("token_data"): TextSelector(
+                        TextSelectorConfig(multiline=True)
+                    ),
+                }
+            ),
+            errors=errors,
+            description_placeholders={
+                "portal_url": "https://app.luminsmart.com",
             },
         )
 
@@ -259,6 +328,7 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 data={
                     CONF_ACCESS_TOKEN: self._access_token,
                     CONF_REFRESH_TOKEN: self._refresh_token or "",
+                    CONF_TOKEN_EXPIRES_AT: self._expires_at or 0.0,
                     CONF_PANELS: panels_config,
                     CONF_USE_CLOUD_FALLBACK: True,
                 },
@@ -337,6 +407,7 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     data={
                         CONF_ACCESS_TOKEN: token,
                         CONF_REFRESH_TOKEN: "",
+                        CONF_TOKEN_EXPIRES_AT: jwt_expiry(token) or 0.0,
                         CONF_PANELS: [
                             {
                                 CONF_PANEL_GUID: guid,
