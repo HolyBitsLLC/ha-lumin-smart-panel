@@ -131,7 +131,14 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
             description_placeholders={
                 "auth0_domain": AUTH0_DOMAIN,
-                "portal_url": "https://portal.luminsmart.com",
+                # The live SPA is app.luminsmart.com. This placeholder renders
+                # into the step-1 help text ("Go to {portal_url} and log in"),
+                # and the same string already says the token lives in the
+                # app.luminsmart.com local storage — pointing the login step at
+                # the older portal host sent users to a different origin whose
+                # local storage does not hold the token. async_step_reauth_confirm
+                # already used app.luminsmart.com; this makes the two agree.
+                "portal_url": "https://app.luminsmart.com",
             },
         )
 
