@@ -12,14 +12,18 @@
       },
       "token": {
         "title": "Lumin Account Authentication",
-        "description": "Paste your token data from the Lumin portal.\n\n1. Go to {portal_url} and log in\n2. Open browser DevTools (F12)\n3. Go to Application → Local Storage → app.luminsmart.com\n4. Click the auth entry and copy the entire Value field\n\nYou can paste the full JSON blob or just the access_token string. The refresh token contained in the blob is the durable credential: every access token is refreshed automatically, including after a Home Assistant restart, so this is normally a one-time setup step.",
+        "description": "Paste your token data from the Lumin portal.\n\n1. Go to {portal_url} and log in\n2. Open browser DevTools (F12)\n3. Go to Application → Local Storage → app.luminsmart.com\n4. Click the auth entry and copy the entire Value field\n\nPaste the whole Value field. It is JSON that contains both the access token and the refresh token, and the refresh token is the durable credential that keeps the integration working across restarts and outages. A bare access token is also accepted, but it expires in about 24 hours and cannot be refreshed.",
         "data": {
           "token_data": "Token Data (paste JSON blob or access token)"
         }
       },
+      "access_token_only": {
+        "title": "Access token only — cannot be refreshed",
+        "description": "That is a bare access token, not the full Local Storage JSON blob. It works now, but Lumin access tokens expire in about 24 hours and a bare token carries no refresh token, so Home Assistant will have to ask you for new token data again as soon as it expires.\n\nTo avoid that, cancel and paste the entire Value field from Local Storage instead — it contains both tokens.\n\nSubmit to continue with the short-lived token."
+      },
       "reauth_confirm": {
         "title": "Re-authenticate Lumin",
-        "description": "The stored Lumin token can no longer be refreshed, so Home Assistant needs fresh token data. Your panel selection and IP addresses are kept.\n\n1. Go to {portal_url} and log in\n2. Open browser DevTools (F12)\n3. Go to Application → Local Storage → app.luminsmart.com\n4. Click the auth entry and copy the entire Value field\n\nYou can paste the full JSON blob or just the access_token string.",
+        "description": "The stored Lumin token can no longer be refreshed, so Home Assistant needs fresh token data. Your panel selection and IP addresses are kept.\n\n1. Go to {portal_url} and log in\n2. Open browser DevTools (F12)\n3. Go to Application → Local Storage → app.luminsmart.com\n4. Click the auth entry and copy the entire Value field\n\nPaste the whole Value field so the refresh token is captured. A bare access token is also accepted, but it lasts about 24 hours and cannot be refreshed.",
         "data": {
           "token_data": "Token Data (paste JSON blob or access token)"
         }
@@ -47,7 +51,8 @@
     },
     "error": {
       "invalid_auth": "Invalid access token. Please check your token and try again.",
-      "invalid_token_format": "Could not parse token data. Paste the full JSON value from Local Storage, or a raw access token starting with 'ey'.",
+      "invalid_token_format": "Could not read that as token data. Paste the entire Local Storage Value field (it starts with '{'), the inner body object, or a bare access token (a JWT starting with 'ey').",
+      "refresh_token_only": "That looks like a refresh token, not the token bundle. Paste the entire Value field from Local Storage (Ctrl+A, Ctrl+C) so both the access token and the refresh token are captured.",
       "no_panels": "No panels found on this Lumin account.",
       "cannot_connect": "Cannot connect to the panel at the specified IP address.",
       "unknown": "An unexpected error occurred."

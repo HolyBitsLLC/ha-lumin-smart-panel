@@ -293,7 +293,10 @@ class _ApiSession:
 
 
 def _cloud_client_with(
-    api_session: _ApiSession, token_session: _FakeSession, refresh_token: str = "rt"
+    api_session: _ApiSession,
+    token_session: _FakeSession,
+    refresh_token: str = "rt",
+    use_cloud_fallback: bool = True,
 ) -> api.LuminApiClient:
     manager = api.LuminTokenManager(
         session=token_session,
@@ -306,7 +309,7 @@ def _cloud_client_with(
         session=api_session,
         access_token="expired-token",
         panels=[],
-        use_cloud_fallback=True,
+        use_cloud_fallback=use_cloud_fallback,
         token_manager=manager,
     )
 
@@ -345,3 +348,31 @@ def test_dead_grant_on_the_cloud_path_propagates_reauth() -> None:
 
     with pytest.raises(api.LuminReauthRequired):
         asyncio.run(client.get_circuits(panel))
+
+
+def test_401_without_a_refresh_token_prompts_reauth_for_cloud_entries() -> None:
+    """A bare-access-token entry must prompt, not poll a 401 forever.
+
+    Before this fix `async_handle_auth_error` returned False when no refresh
+    token was stored, so the coordinator retried every 30s and the entry
+    silently went unavailable with no way back except a restart.
+    """
+    api_session = _ApiSession([_ApiResponse(401, {})])
+    token_session = _FakeSession(_FakeResponse(200, "{}"))
+    client = _cloud_client_with(api_session, token_session, refresh_token="")
+    panel = api.LuminPanel(ip_address="", guid="GUID1", lsp_id=1)
+
+    with pytest.raises(api.LuminReauthRequired):
+        asyncio.run(client.get_circuits(panel))
+
+
+def test_401_without_a_refresh_token_is_not_fatal_for_local_only_entries() -> None:
+    """A manual (local-only) panel entry never had a refresh grant to begin with."""
+    client = _cloud_client_with(
+        _ApiSession([_ApiResponse(200, {})]),
+        _FakeSession(_FakeResponse(200, "{}")),
+        refresh_token="",
+        use_cloud_fallback=False,
+    )
+
+    assert asyncio.run(client.async_handle_auth_error()) is False
