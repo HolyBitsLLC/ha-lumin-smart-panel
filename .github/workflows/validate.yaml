@@ -1,0 +1,49 @@
+name: Validate
+
+# HACS repository validation for the `lumin` integration.
+#
+# `main`/`master` here is PR-only, and a HACS install is the supported delivery
+# path for this component (harvester-argo ADR-0157), so a change that makes the
+# repository invalid in HACS must fail review rather than fail silently in the
+# Home Assistant UI. The action runs the same validators HACS uses, with
+# `category: integration`.
+#
+# Policy: shared org runners only. PRs from forks fall back to GitHub-hosted
+# runners so untrusted code never executes on self-hosted infrastructure — the
+# same split ci.yaml uses.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-hacs:
+    runs-on: ${{ github.event_name == 'push' && fromJSON('["self-hosted", "linux", "x64", "krubecible", "holybits-shared"]') || 'ubuntu-latest' }}
+    steps:
+      - name: HACS validation
+        # Pinned to the 22.5.0 release commit, like every other action in this
+        # repo: `@main` would let the validator change under us, which is the
+        # same unpinned-remote problem this workflow exists to catch.
+        uses: hacs/action@d556e736723344f83838d08488c983a15381059a # 22.5.0
+        with:
+          category: integration
+          # `brands` and `topics` are requirements for inclusion in the HACS
+          # *default* repository list, not for a custom repository: HACS
+          # installs this repo without them. `brands` would need an icon in the
+          # upstream home-assistant brands repo; `topics` is repository
+          # metadata (a settings change, not a commit). `license` is ignored
+          # because this repository has no LICENSE file yet — picking one is an
+          # owner decision, and HACS does not require it to install. Everything
+          # else stays enforced: hacsjson (the hacs.json schema, which rejects
+          # unknown keys), integration_manifest (domain/documentation/
+          # issue_tracker/codeowners/name/version), information (README),
+          # description, issues, archived.
+          ignore: brands topics license
