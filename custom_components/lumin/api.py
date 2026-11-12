@@ -23,7 +23,7 @@ import json
 import logging
 import ssl
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Sequence
 from typing import Any
 
 import aiohttp
@@ -52,11 +52,12 @@ class LuminConnectionError(Exception):
     """Connection error."""
 
 
-def jwt_expiry(token: str) -> float | None:
-    """Return the `exp` claim of a JWT as epoch seconds, or None.
+def _jwt_payload(token: str) -> dict[str, Any] | None:
+    """Decode a JWT payload, or None if the token is opaque/malformed.
 
-    The signature is deliberately not verified: the value is only used to
-    schedule a refresh, never to authorise a request.
+    The signature is deliberately not verified: claims are only used to route
+    a request (which client to refresh with) or to schedule a refresh, never
+    to authorise one.
     """
     try:
         payload_segment = token.split(".")[1]
@@ -68,11 +69,42 @@ def jwt_expiry(token: str) -> float | None:
         payload = json.loads(base64.urlsafe_b64decode(padded))
     except (ValueError, TypeError):
         return None
+    return payload if isinstance(payload, dict) else None
 
-    exp = payload.get("exp") if isinstance(payload, dict) else None
+
+def jwt_claim(token: str, claim: str) -> Any | None:
+    """Return an unverified JWT claim, or None."""
+    payload = _jwt_payload(token)
+    return payload.get(claim) if payload is not None else None
+
+
+def jwt_expiry(token: str) -> float | None:
+    """Return the `exp` claim of a JWT as epoch seconds, or None."""
+    exp = jwt_claim(token, "exp")
     if isinstance(exp, (int, float)):
         return float(exp)
     return None
+
+
+def client_id_candidates(
+    access_token: str,
+    known_client_ids: Sequence[str],
+    stored_client_id: str | None = None,
+) -> list[str]:
+    """Order the candidate client ids for a refresh, best first.
+
+    An Auth0 refresh token is bound to the client that was issued it, so
+    refreshing with the wrong `client_id` fails with `invalid_grant`. The
+    access token names its own issuer in the `azp` claim, which makes this
+    exact for a pasted token; `stored_client_id` covers an entry that has
+    already learned the answer, and the remaining known ids are fallbacks.
+    """
+    candidates: list[str] = []
+    azp = jwt_claim(access_token, "azp")
+    for candidate in (stored_client_id, azp, *known_client_ids):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
 
 
 def _auth0_error_code(body: str) -> str:
@@ -86,6 +118,15 @@ def _auth0_error_code(body: str) -> str:
         if isinstance(code, str):
             return code
     return ""
+
+
+class _RefreshRejected(Exception):
+    """Auth0 refused the refresh token for a specific client id."""
+
+    def __init__(self, code: str, status: int) -> None:
+        super().__init__(code)
+        self.code = code
+        self.status = status
 
 
 class LuminTokenManager:
@@ -110,12 +151,18 @@ class LuminTokenManager:
         client_id: str,
         on_tokens_refreshed: Callable[[str, str, float], Coroutine] | None = None,
         expires_at: float | None = None,
+        client_id_fallbacks: Sequence[str] = (),
     ) -> None:
         self._session = session
         self._access_token = access_token
         self._refresh_token = refresh_token
         self._auth0_domain = auth0_domain
-        self._client_id = client_id
+        # An Auth0 refresh token is bound to the client that issued it, so keep
+        # every plausible id and try them in order rather than pinning one.
+        self._client_ids: tuple[str, ...] = tuple(
+            dict.fromkeys((client_id, *client_id_fallbacks))
+        )
+        self._client_id = self._client_ids[0]
         self._on_tokens_refreshed = on_tokens_refreshed
         # Prefer the persisted expiry; fall back to the token's own `exp` claim.
         # 0 means "unknown" — assume valid until a request says otherwise.
@@ -129,6 +176,11 @@ class LuminTokenManager:
     @property
     def refresh_token(self) -> str:
         return self._refresh_token
+
+    @property
+    def client_id(self) -> str:
+        """The client id the grant is known to belong to."""
+        return self._client_id
 
     @property
     def expires_at(self) -> float:
@@ -186,6 +238,12 @@ class LuminTokenManager:
                 revoked, or password changed). A human must re-authenticate.
             LuminAuthError: the refresh failed for a retryable reason.
             LuminConnectionError: the refresh could not reach Auth0.
+
+        An Auth0 refresh token is bound to the client that was issued it, and
+        the two Lumin clients (portal SPA and mobile app) issue different ones.
+        Each candidate id from `client_id_candidates()` is tried once, so a
+        token pasted from the portal still refreshes even though the mobile id
+        was the previous default.
         """
         async with self._refresh_lock:
             if stale_token is not None and self._access_token != stale_token:
@@ -194,42 +252,26 @@ class LuminTokenManager:
             if not self._refresh_token:
                 raise LuminReauthRequired("No refresh token available")
 
-            url = f"https://{self._auth0_domain}/oauth/token"
-            payload = {
-                "grant_type": "refresh_token",
-                "client_id": self._client_id,
-                "refresh_token": self._refresh_token,
-            }
-            try:
-                async with self._session.post(
-                    url, json=payload, timeout=aiohttp.ClientTimeout(total=15)
-                ) as resp:
-                    status = resp.status
-                    body = await resp.text()
-            except (aiohttp.ClientError, TimeoutError) as err:
-                raise LuminConnectionError(
-                    f"Could not reach the Auth0 token endpoint: {err}"
-                ) from err
+            data: dict[str, Any] | None = None
+            rejected: tuple[str, int] = ("unknown", 0)
+            for index, client_id in enumerate(self._client_ids):
+                last_attempt = index == len(self._client_ids) - 1
+                try:
+                    data = await self._async_refresh_once(client_id, last_attempt)
+                except _RefreshRejected as err:
+                    rejected = (err.code, err.status)
+                    continue
+                self._client_id = client_id
+                break
 
-            if status != 200:
-                code = _auth0_error_code(body)
-                _LOGGER.error(
-                    "Token refresh failed (%d, %s): %s",
-                    status,
-                    code or "no error code",
-                    body[:200],
+            if data is None:
+                # Every candidate client was rejected, so the grant itself is
+                # gone (revoked, rotated by another client, or password changed).
+                code, _status = rejected
+                raise LuminReauthRequired(
+                    "The Lumin refresh token is no longer valid "
+                    f"(Auth0: {code}); fresh token data is required"
                 )
-                if code in REFRESH_TOKEN_DEAD_ERRORS:
-                    raise LuminReauthRequired(
-                        "The Lumin refresh token is no longer valid "
-                        f"(Auth0: {code}); fresh token data is required"
-                    )
-                raise LuminAuthError(f"Token refresh failed with status {status}")
-
-            try:
-                data = json.loads(body)
-            except (ValueError, TypeError) as err:
-                raise LuminAuthError("Token refresh returned a malformed body") from err
 
             new_access = data.get("access_token")
             new_refresh = data.get("refresh_token", self._refresh_token)
@@ -250,6 +292,53 @@ class LuminTokenManager:
                 await self._on_tokens_refreshed(
                     new_access, new_refresh, self._expires_at
                 )
+
+    async def _async_refresh_once(
+        self, client_id: str, log_failure: bool
+    ) -> dict[str, Any]:
+        """Try one refresh-token exchange with a specific client id.
+
+        Raises `_RefreshRejected` when Auth0 rejects the token for this client
+        (so the caller may try the next known client), `LuminAuthError` for a
+        retryable failure, and `LuminConnectionError` when Auth0 is unreachable.
+        """
+        url = f"https://{self._auth0_domain}/oauth/token"
+        payload = {
+            "grant_type": "refresh_token",
+            "client_id": client_id,
+            "refresh_token": self._refresh_token,
+        }
+        try:
+            async with self._session.post(
+                url, json=payload, timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                status = resp.status
+                body = await resp.text()
+        except (aiohttp.ClientError, TimeoutError) as err:
+            raise LuminConnectionError(
+                f"Could not reach the Auth0 token endpoint: {err}"
+            ) from err
+
+        if status != 200:
+            code = _auth0_error_code(body)
+            if log_failure:
+                _LOGGER.error(
+                    "Token refresh failed (%d, %s): %s",
+                    status,
+                    code or "no error code",
+                    body[:200],
+                )
+            if code in REFRESH_TOKEN_DEAD_ERRORS:
+                raise _RefreshRejected(code, status)
+            raise LuminAuthError(f"Token refresh failed with status {status}")
+
+        try:
+            data = json.loads(body)
+        except (ValueError, TypeError) as err:
+            raise LuminAuthError("Token refresh returned a malformed body") from err
+        if not isinstance(data, dict):
+            raise LuminAuthError("Token refresh returned a malformed body")
+        return data
 
 
 class LuminPanel:

@@ -30,8 +30,10 @@ def _b64(obj: dict) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
 
 
-def _jwt(exp: float | None) -> str:
-    payload = {"sub": "test"} if exp is None else {"exp": exp}
+def _jwt(exp: float | None, **claims: object) -> str:
+    payload: dict[str, object] = {"sub": "test", **claims}
+    if exp is not None:
+        payload["exp"] = exp
     return f"{_b64({'alg': 'RS256', 'typ': 'JWT'})}.{_b64(payload)}.signature"
 
 
@@ -58,6 +60,18 @@ class _FakeSession:
     def post(self, url: str, json: dict | None = None, timeout: object = None):
         self.requests.append((url, json or {}))
         return self._response
+
+
+class _SequenceSession:
+    """Returns queued responses in order, one per request."""
+
+    def __init__(self, responses: list[_FakeResponse]) -> None:
+        self._responses = list(responses)
+        self.requests: list[tuple[str, dict]] = []
+
+    def post(self, url: str, json: dict | None = None, timeout: object = None):
+        self.requests.append((url, json or {}))
+        return self._responses[min(len(self.requests), len(self._responses)) - 1]
 
 
 def _manager(session: _FakeSession, **kwargs) -> api.LuminTokenManager:
@@ -161,6 +175,90 @@ def test_refresh_without_any_refresh_token_requires_reauth() -> None:
     manager = _manager(_FakeSession(_FakeResponse(200, "{}")), refresh_token="")
     with pytest.raises(api.LuminReauthRequired):
         asyncio.run(manager.async_refresh())
+
+
+def test_jwt_claim_reads_the_issuer() -> None:
+    token = _jwt(time.time() + 60, azp="portal-client")
+    assert api.jwt_claim(token, "azp") == "portal-client"
+    assert api.jwt_claim(token, "missing") is None
+    assert api.jwt_claim("opaque-token", "azp") is None
+
+
+def test_client_id_candidates_prefers_the_token_issuer() -> None:
+    token = _jwt(time.time() + 60, azp="portal-client")
+    assert api.client_id_candidates(
+        token, ("mobile-client", "portal-client")
+    ) == ["portal-client", "mobile-client"]
+
+
+def test_client_id_candidates_falls_back_to_the_known_clients() -> None:
+    assert api.client_id_candidates(
+        _jwt(None), ("mobile-client", "portal-client")
+    ) == ["mobile-client", "portal-client"]
+    assert api.client_id_candidates(
+        _jwt(None),
+        ("mobile-client", "portal-client"),
+        stored_client_id="portal-client",
+    ) == ["portal-client", "mobile-client"]
+
+
+def test_refresh_retries_with_the_next_client_id() -> None:
+    """A portal-issued refresh token must not be sent to the mobile client."""
+    rejection = _FakeResponse(403, json.dumps({"error": "invalid_grant"}))
+    success = _FakeResponse(
+        200,
+        json.dumps(
+            {
+                "access_token": _jwt(time.time() + 3600),
+                "refresh_token": "rotated",
+                "expires_in": 3600,
+            }
+        ),
+    )
+    session = _SequenceSession([rejection, success])
+    manager = _manager(
+        session,
+        client_id="mobile-client",
+        client_id_fallbacks=["portal-client"],
+    )
+
+    asyncio.run(manager.async_refresh())
+
+    assert [request[1]["client_id"] for request in session.requests] == [
+        "mobile-client",
+        "portal-client",
+    ]
+    assert manager.client_id == "portal-client"
+    assert manager.refresh_token == "rotated"
+
+
+def test_reauth_only_after_every_client_is_rejected() -> None:
+    rejection = _FakeResponse(403, json.dumps({"error": "invalid_grant"}))
+    session = _SequenceSession([rejection, rejection])
+    manager = _manager(
+        session,
+        client_id="mobile-client",
+        client_id_fallbacks=["portal-client"],
+    )
+
+    with pytest.raises(api.LuminReauthRequired):
+        asyncio.run(manager.async_refresh())
+
+    assert len(session.requests) == 2
+
+
+def test_server_error_does_not_burn_a_second_client_attempt() -> None:
+    session = _SequenceSession([_FakeResponse(503, "upstream unavailable")])
+    manager = _manager(
+        session,
+        client_id="mobile-client",
+        client_id_fallbacks=["portal-client"],
+    )
+
+    with pytest.raises(api.LuminAuthError):
+        asyncio.run(manager.async_refresh())
+
+    assert len(session.requests) == 1
 
 
 class _ApiResponse:

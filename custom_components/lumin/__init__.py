@@ -17,9 +17,11 @@ from .api import (
     LuminPanel,
     LuminReauthRequired,
     LuminTokenManager,
+    client_id_candidates,
 )
 from .const import (
     AUTH0_CLIENT_ID,
+    AUTH0_CLIENT_ID_PORTAL,
     AUTH0_DOMAIN,
     CONF_PANEL_GUID,
     CONF_PANEL_IP,
@@ -64,12 +66,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: LuminConfigEntry) -> boo
             entry.runtime_data.update_ws_tokens(new_access)
         _LOGGER.debug("Persisted refreshed tokens to config entry")
 
+    # The grant belongs to whichever client issued it: a token pasted from the
+    # portal SPA was issued by the portal client, and refreshing it with the
+    # mobile client id fails with `invalid_grant`. The access token's `azp`
+    # claim names the issuer, so order the candidates from it.
+    client_ids = client_id_candidates(
+        token, (AUTH0_CLIENT_ID, AUTH0_CLIENT_ID_PORTAL)
+    )
+
     token_manager = LuminTokenManager(
         session=session,
         access_token=token,
         refresh_token=refresh_token,
         auth0_domain=AUTH0_DOMAIN,
-        client_id=AUTH0_CLIENT_ID,
+        client_id=client_ids[0],
+        client_id_fallbacks=tuple(client_ids[1:]),
         on_tokens_refreshed=_on_tokens_refreshed,
         expires_at=entry.data.get(CONF_TOKEN_EXPIRES_AT),
     )

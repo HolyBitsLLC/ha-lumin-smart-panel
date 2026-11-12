@@ -133,6 +133,15 @@ config entry (.storage)
    Assistant raises a Repairs issue and starts a reauth flow, and only that
    prompt asks for new token data.
 
+The two Lumin clients issue *different* refresh tokens. A blob copied from the
+portal (`app.luminsmart.com`, client `un7psu3o3AZdd1cO1fcFSwqsQQgeVIXD`) is
+bound to the portal client, while the mobile app's tokens belong to
+`eKr5fjYckpRJbP3iqywCZXapDZbB3Kgs`; Auth0 answers `invalid_grant` when a token is
+presented by the wrong client. The integration therefore reads the issuer from
+the access token's `azp` claim and uses it first, falling back to the other known
+client id once. Without that, a token pasted from the portal would refresh with
+the mobile client id and look like a dead grant.
+
 ### Why not username/password?
 
 Deriving the token from the Lumin email/password is not possible without a human
@@ -147,6 +156,13 @@ solving a CAPTCHA:
   (`webAuth.renderCaptcha(...)` / `captcha: this.captcha.getValue()` in
   `https://auth.luminsmart.io/login`). Posting credentials without one returns
   `401 {"code":"invalid_captcha"}`.
+- The tenant advertises an RFC 8628 device-authorization endpoint, but both
+  Lumin clients reject the device grant
+  (`403 {"error":"unauthorized_client","error_description":"Grant type 'urn:ietf:params:oauth:grant-type:device_code' not allowed for the client."}`),
+  so the "enter a code on a web page" flow is not available either.
+- Neither client allows a Home Assistant redirect URI: `/authorize` with
+  `redirect_uri=http://localhost:8123/auth/external/callback` returns
+  `403 Callback URL mismatch`. Only `https://app.luminsmart.com` is registered.
 
 So the integration deliberately does not store the account password. The
 refresh token is the machine credential, and the reauth flow is the fallback
