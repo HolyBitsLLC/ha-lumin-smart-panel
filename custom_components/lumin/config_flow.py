@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 from typing import Any
 
 import aiohttp
@@ -41,6 +39,7 @@ from .const import (
     CONF_USE_CLOUD_FALLBACK,
     DOMAIN,
 )
+from .token_input import parse_token_input
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,6 +55,47 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._expires_at: float | None = None
         self._panels: list[dict[str, Any]] = []
         self._selected_panels: list[dict[str, Any]] = []
+        self._reauth_entry_id: str | None = None
+
+    async def _async_accept_token_input(self, raw: str) -> str | None:
+        """Validate one pasted value and keep the tokens for the remaining steps.
+
+        Returns an ``errors["base"]`` key on failure, or ``None`` on success. The
+        parse itself is in ``token_input.parse_token_input`` so it can be unit
+        tested without Home Assistant installed.
+        """
+        parsed = parse_token_input(raw)
+        _LOGGER.debug(
+            "Parsed token input: length=%d, refreshable=%s, error=%s",
+            len(raw),
+            parsed.refreshable,
+            parsed.error,
+        )
+        if parsed.error:
+            return parsed.error
+
+        session = async_get_clientsession(self.hass)
+        try:
+            panels = await LuminCloudClient(session, parsed.access).get_panels()
+        except LuminAuthError as err:
+            _LOGGER.warning("Lumin rejected the supplied token: %s", err)
+            return "invalid_auth"
+        except LuminConnectionError as err:
+            _LOGGER.error("Connection error during panel fetch: %s", err)
+            return "cannot_connect"
+        except Exception:  # anything else becomes the generic `unknown` error
+            _LOGGER.exception("Unexpected error while validating Lumin token data")
+            return "unknown"
+
+        if not panels:
+            _LOGGER.warning("Token valid but no panels found on account")
+            return "no_panels"
+
+        self._access_token = parsed.access
+        self._refresh_token = parsed.refresh
+        self._expires_at = jwt_expiry(parsed.access)
+        self._panels = panels
+        return None
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -71,53 +111,22 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> config_entries.ConfigFlowResult:
         """Handle token-based authentication.
 
-        Accepts either:
-        1. The full JSON blob from portal Local Storage (auto-extracts tokens)
-        2. A raw JWT access token string
+        Accepts the full Local Storage JSON blob, the inner body object, or a
+        bare access token. A bare token is accepted but confirmed first, because
+        it has no refresh grant and dies within about a day.
         """
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            raw = user_input.get("token_data", "").strip()
-            _LOGGER.debug(
-                "Token input received: length=%d, starts_with=%s",
-                len(raw),
-                raw[:40] + "..." if len(raw) > 40 else raw,
+            error = await self._async_accept_token_input(
+                user_input.get("token_data", "")
             )
-            token, refresh = self._parse_token_input(raw)
-            _LOGGER.debug(
-                "Parse result: token_len=%d, has_refresh=%s",
-                len(token),
-                bool(refresh),
-            )
-
-            if not token:
-                errors["base"] = "invalid_token_format"
+            if error:
+                errors["base"] = error
+            elif self._refresh_token:
+                return await self.async_step_select_panels()
             else:
-                session = async_get_clientsession(self.hass)
-                cloud = LuminCloudClient(session, token)
-
-                try:
-                    panels = await cloud.get_panels()
-                    if not panels:
-                        _LOGGER.warning("Token valid but no panels found on account")
-                        errors["base"] = "no_panels"
-                    else:
-                        _LOGGER.debug("Found %d panels", len(panels))
-                        self._access_token = token
-                        self._refresh_token = refresh
-                        self._expires_at = jwt_expiry(token)
-                        self._panels = panels
-                        return await self.async_step_select_panels()
-                except LuminAuthError as err:
-                    _LOGGER.warning("Auth failed: %s", err)
-                    errors["base"] = "invalid_auth"
-                except LuminConnectionError as err:
-                    _LOGGER.error("Connection error during panel fetch: %s", err)
-                    errors["base"] = "cannot_connect"
-                except Exception:
-                    _LOGGER.exception("Unexpected error during auth")
-                    errors["base"] = "unknown"
+                return await self.async_step_access_token_only()
 
         return self.async_show_form(
             step_id="token",
@@ -142,6 +151,26 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             },
         )
 
+    async def async_step_access_token_only(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Make the user acknowledge a token that cannot be refreshed.
+
+        A bare access token works until it expires (Auth0 issues ~24h tokens) and
+        carries no refresh grant, so Home Assistant will have to ask for new
+        token data again. Creating that entry without saying so is what makes the
+        "paste the key" path look like it worked and then fail a day later.
+        """
+        if user_input is not None:
+            if self._reauth_entry_id is not None:
+                return self._async_finish_reauth()
+            return await self.async_step_select_panels()
+
+        return self.async_show_form(
+            step_id="access_token_only",
+            data_schema=vol.Schema({}),
+        )
+
     async def async_step_reauth(
         self, entry_data: dict[str, Any]
     ) -> config_entries.ConfigFlowResult:
@@ -151,6 +180,7 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         `ConfigEntryAuthFailed`. The panel list and IP addresses are preserved;
         only the token data is replaced.
         """
+        self._reauth_entry_id = self.context.get("entry_id")
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(
@@ -160,37 +190,15 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            raw = user_input.get("token_data", "").strip()
-            token, refresh = self._parse_token_input(raw)
-
-            if not token:
-                errors["base"] = "invalid_token_format"
+            error = await self._async_accept_token_input(
+                user_input.get("token_data", "")
+            )
+            if error:
+                errors["base"] = error
+            elif self._refresh_token:
+                return self._async_finish_reauth()
             else:
-                session = async_get_clientsession(self.hass)
-                try:
-                    panels = await LuminCloudClient(session, token).get_panels()
-                except LuminAuthError:
-                    errors["base"] = "invalid_auth"
-                except LuminConnectionError:
-                    errors["base"] = "cannot_connect"
-                else:
-                    entry = self.hass.config_entries.async_get_entry(
-                        self.context["entry_id"]
-                    )
-                    if entry is None:
-                        return self.async_abort(reason="reauth_failed")
-                    if not panels:
-                        errors["base"] = "no_panels"
-                    else:
-                        return self.async_update_reload_and_abort(
-                            entry,
-                            data_updates={
-                                CONF_ACCESS_TOKEN: token,
-                                CONF_REFRESH_TOKEN: refresh,
-                                CONF_TOKEN_EXPIRES_AT: jwt_expiry(token) or 0.0,
-                            },
-                            reason="reauth_successful",
-                        )
+                return await self.async_step_access_token_only()
 
         return self.async_show_form(
             step_id="reauth_confirm",
@@ -207,56 +215,20 @@ class LuminConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             },
         )
 
-    @staticmethod
-    def _parse_token_input(raw: str) -> tuple[str, str]:
-        """Parse token input — accepts JSON blob, truncated JSON, or raw JWT.
-
-        Auth0 Local Storage format (may be very large and get truncated):
-          {"body":{"access_token":"...","refresh_token":"...",...}}
-        Also accepts the inner body object directly:
-          {"access_token":"...","refresh_token":"...",...}
-        Or a plain JWT string starting with 'ey'.
-
-        Returns (access_token, refresh_token). Empty strings on failure.
-        """
-        if not raw:
-            return ("", "")
-
-        # Try clean JSON parse first
-        try:
-            data = json.loads(raw)
-            if isinstance(data, dict):
-                if "body" in data and isinstance(data["body"], dict):
-                    data = data["body"]
-                access = data.get("access_token", "")
-                refresh = data.get("refresh_token", "")
-                if access:
-                    return (access, refresh)
-        except (json.JSONDecodeError, TypeError, KeyError):
-            pass
-
-        # Regex fallback — handles truncated JSON from large Local Storage blobs.
-        # The access_token is a JWT (ey...) and refresh_token starts with v1.
-        access_match = re.search(
-            r'"access_token"\s*:\s*"(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)"',
-            raw,
+    def _async_finish_reauth(self) -> config_entries.ConfigFlowResult:
+        """Write the validated tokens into the existing entry and reload it."""
+        entry = self.hass.config_entries.async_get_entry(self._reauth_entry_id or "")
+        if entry is None:
+            return self.async_abort(reason="reauth_failed")
+        return self.async_update_reload_and_abort(
+            entry,
+            data_updates={
+                CONF_ACCESS_TOKEN: self._access_token or "",
+                CONF_REFRESH_TOKEN: self._refresh_token or "",
+                CONF_TOKEN_EXPIRES_AT: self._expires_at or 0.0,
+            },
+            reason="reauth_successful",
         )
-        refresh_match = re.search(
-            r'"refresh_token"\s*:\s*"([^"]+)"',
-            raw,
-        )
-        if access_match:
-            return (
-                access_match.group(1),
-                refresh_match.group(1) if refresh_match else "",
-            )
-
-        # Plain JWT string (starts with ey = base64 of {"alg":...)
-        stripped = raw.strip()
-        if stripped.startswith("ey") and "." in stripped:
-            return (stripped, "")
-
-        return ("", "")
 
     async def async_step_select_panels(
         self, user_input: dict[str, Any] | None = None

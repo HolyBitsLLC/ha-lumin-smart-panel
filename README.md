@@ -60,13 +60,19 @@ Local-first Home Assistant integration for [Lumin Smart Panels](https://www.lumi
 4. Click the auth entry and **copy the entire Value field** (Ctrl+A, Ctrl+C)
 5. Paste it into the integration's setup form — the integration extracts the access token and refresh token automatically
 
-> **Tip**: You can paste the full JSON blob (5000+ chars), a truncated blob, the inner `body` object, or just a raw JWT access token. The parser handles all formats.
+> **Tip**: You can paste the full JSON blob (5000+ chars), a truncated blob, the inner `body` object, or just a bare access token JWT. Surrounding quotes, a `Bearer ` prefix, and leading/trailing whitespace are stripped for you. Pasting a refresh token on its own is rejected with a message saying so, because both tokens are needed.
 
-This is normally a **one-time** step. The refresh token in the blob is the durable
-credential: the integration uses it to mint new access tokens proactively, on any
+Pasting the blob is normally a **one-time** step. The refresh token in the blob is the
+durable credential: the integration uses it to mint new access tokens proactively, on any
 401, and at every startup, so a Home Assistant restart or a long outage recovers
 by itself. See [Token lifecycle](#token-lifecycle) for the one case that still
 needs a human.
+
+Pasting **only the access token** is accepted as a fallback, but it is not
+one-time: Lumin access tokens expire in about 24 hours and a bare token carries
+no refresh token, so the integration cannot renew it. The setup form says this
+before creating the entry, and the entry asks for reauthentication when the token
+expires.
 
 ### Installation
 
