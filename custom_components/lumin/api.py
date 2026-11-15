@@ -282,9 +282,11 @@ class LuminTokenManager:
 
             self._access_token = new_access
             self._refresh_token = new_refresh
+            # Without `expires_in` keep nothing from the old (past) expiry: use
+            # the new token's own `exp`, else unknown (0, valid until a 401).
+            self._expires_at = 0.0
             self.set_expiry(expires_in)
             if self._expires_at == 0:
-                # No `expires_in` in the response; fall back to the JWT claim.
                 self._expires_at = jwt_expiry(new_access) or 0.0
             _LOGGER.debug("Token refreshed, expires in %ss", expires_in)
 
@@ -588,6 +590,7 @@ class LuminApiClient:
         self._panels = {p.guid: p for p in panels}
         self._use_cloud_fallback = use_cloud_fallback
         self._token_manager = token_manager
+        self._refresh_failing = False
 
         self._local_clients: dict[str, LuminLocalClient] = {}
         for panel in panels:
@@ -608,7 +611,21 @@ class LuminApiClient:
     async def async_ensure_token(self) -> None:
         """Proactively refresh the token if it's near expiry."""
         if self._token_manager:
-            new_token = await self._token_manager.ensure_valid_token()
+            try:
+                new_token = await self._token_manager.ensure_valid_token()
+            except LuminReauthRequired:
+                raise
+            except (LuminConnectionError, LuminAuthError) as err:
+                # Auth0 unreachable (e.g. internet down): keep the current token
+                # so the local panel is still asked; a 401 there refreshes again.
+                # Warn once per outage, not on every poll.
+                log = _LOGGER.debug if self._refresh_failing else _LOGGER.warning
+                log("Proactive token refresh failed, polling with the current token: %s", err)
+                self._refresh_failing = True
+                return
+            if self._refresh_failing:
+                _LOGGER.info("Proactive token refresh working again")
+                self._refresh_failing = False
             if new_token != self._token:
                 self.update_token(new_token)
 
