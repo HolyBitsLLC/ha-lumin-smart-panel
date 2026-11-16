@@ -62,8 +62,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: LuminConfigEntry) -> boo
             },
         )
         # Push new token to WebSocket clients (they need it for cloud reconnect)
-        if entry.runtime_data:
-            entry.runtime_data.update_ws_tokens(new_access)
+        # runtime_data is unset while the startup refresh runs (it is assigned
+        # once the coordinator exists, and HA declares it as an annotation only).
+        coordinator = getattr(entry, "runtime_data", None)
+        if coordinator:
+            coordinator.update_ws_tokens(new_access)
         _LOGGER.debug("Persisted refreshed tokens to config entry")
 
     # The grant belongs to whichever client issued it: a token pasted from the
