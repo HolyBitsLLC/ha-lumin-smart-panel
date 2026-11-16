@@ -25,8 +25,16 @@ pytest --cov=custom_components/lumin -v
 
 ## CI
 
-All PRs targeting `master` must pass the `lint` and `test` jobs before merge. CI runs on self-hosted runners.
+All PRs targeting `master` must pass the `lint`, `test` and `validate` jobs before merge. Pull requests run on GitHub-hosted runners; pushes to `master` run on the shared self-hosted pool.
 
 ## Release Process
 
-Push or merge to `master`. The init container in the cluster deployment pulls the latest `master` on every pod restart.
+Merging to `master` triggers release-please (`.github/workflows/release.yaml`).
+It opens/updates a `chore(master): release X.Y.Z` PR; merging that PR creates the
+GitHub release and tag, and bumps `custom_components/lumin/manifest.json` and
+`.release-please-manifest.json` together. HACS installs that release, so the tag
+and the manifest version always have to match — the `validate` job checks it.
+
+There is no Harbor payload image to build: since ADR-0162 the integration is
+delivered through HACS from the GitHub release, not from an image the cluster
+pulls.
