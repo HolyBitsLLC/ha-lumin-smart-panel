@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.1](https://github.com/HolyBitsLLC/ha-lumin-smart-panel/compare/v0.1.0...v0.1.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* **auth:** accept every documented token paste and name the rejected ones ([32b710a](https://github.com/HolyBitsLLC/ha-lumin-smart-panel/commit/32b710a62fa72ce92025aaee620ef5a9caa5c85e))
+* **auth:** startup refresh crashes setup; failed proactive refresh skips the local panel ([e8beb15](https://github.com/HolyBitsLLC/ha-lumin-smart-panel/commit/e8beb1586080c50bebcec282d0ed5d86630f02d4))
+
 ## 0.1.0 (2026-11-11)
 
 
