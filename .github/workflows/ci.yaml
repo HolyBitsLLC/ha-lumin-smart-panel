@@ -48,3 +48,30 @@ jobs:
         run: python -c "import json; json.load(open('custom_components/lumin/strings.json'))"
       - name: Validate translations
         run: python -c "import json; json.load(open('custom_components/lumin/translations/en.json'))"
+      - name: Check manifest.json version matches release-please
+        # release-please owns the version. `.release-please-manifest.json`
+        # records what it last released, and `release-please-config.json` lists
+        # `custom_components/lumin/manifest.json` in `extra-files`, so the release
+        # PR bumps both together (0.1.1 did). If the generic updater ever skips
+        # the JSON file, HACS would install a tag whose manifest disagrees with
+        # the release, so fail the PR that introduces the drift instead of
+        # patching master after the tag exists. The old `sync-manifest` job tried
+        # to do that with a `git push` to protected master and could never land.
+        run: |
+          python3 - <<'PY'
+          import json
+          import pathlib
+
+          released = json.loads(pathlib.Path(".release-please-manifest.json").read_text())["."]
+          manifest = json.loads(
+              pathlib.Path("custom_components/lumin/manifest.json").read_text()
+          )
+          version = manifest.get("version")
+          if version != released:
+              raise SystemExit(
+                  f"manifest.json version {version!r} does not match "
+                  f"release-please's recorded version {released!r}; "
+                  "update both in the same commit"
+              )
+          print(f"manifest.json version matches release-please: {released}")
+          PY
