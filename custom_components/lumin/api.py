@@ -616,10 +616,21 @@ class LuminApiClient:
         """Refresh after a 401. Returns True when a retry is worth attempting.
 
         Raises:
-            LuminReauthRequired: the refresh token is dead and Home Assistant
-                has to ask the user for fresh token data.
+            LuminReauthRequired: there is no grant to refresh with, or the
+                refresh token is dead, so Home Assistant has to ask the user
+                for fresh token data.
         """
-        if not self._token_manager or not self._token_manager.refresh_token:
+        if not self._token_manager:
+            return False
+        if not self._token_manager.refresh_token:
+            if self._use_cloud_fallback:
+                # An entry created from a bare access token has no refresh grant.
+                # Returning False here would silently poll a 401 forever; raise
+                # so the coordinator hands off to Home Assistant's reauth flow.
+                raise LuminReauthRequired(
+                    "The stored access token expired and no refresh token is "
+                    "available; fresh token data is required"
+                )
             return False
         try:
             await self._token_manager.async_refresh(
