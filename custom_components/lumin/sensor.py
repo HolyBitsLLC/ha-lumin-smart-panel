@@ -6,8 +6,16 @@ Provides three sensor types per circuit:
   - Peak Power (W): Historical max power from REST API.
 
 Plus panel-level aggregate sensors:
-  - Total Power (W): Sum of all circuit live power readings.
-  - Total Energy (kWh): Sum of all circuit energy accumulators.
+  - Total Power (W): Whole-panel power, using the same precedence Lumin's own
+    portal uses (the main circuit plus its paired leg when one exists,
+    otherwise each logical circuit counted once).
+  - Total Energy (kWh): Accumulated from that same whole-panel power.
+
+A two-pole load is reported by the panel as one leg per circuit and reunited via
+the `pair` object in the panel's circuit metadata. Pairing is read from the
+panel, never configured here, so pairs created in the Lumin app need no
+duplicate setup in Home Assistant. The `multiplier` field is a sign for the
+"Everything Else" aggregate, not a scale factor for an individual circuit.
 
 The Energy sensors use state_class TOTAL_INCREASING so they appear in
 Home Assistant's Energy dashboard for grid consumption and per-device tracking.
@@ -51,6 +59,13 @@ async def async_setup_entry(
         circuits = coordinator.get_circuits(guid)
 
         for circuit in circuits:
+            if coordinator.is_pair_leg(circuit["id"]):
+                # The second leg of a paired load. Its reading is folded into
+                # the primary circuit's entities, so creating its own would
+                # show the same physical load twice and let the Energy
+                # dashboard double-count it.
+                continue
+
             # Live power sensor for every circuit (fed by WebSocket)
             entities.append(
                 LuminCircuitPowerSensor(coordinator, panel, circuit)
@@ -99,7 +114,9 @@ class LuminCircuitPowerSensor(
         circuit_name = circuit.get("name", f"Circuit {self._circuit_num}")
         self._attr_unique_id = f"lumin_{panel.guid}_{self._circuit_id}_power"
         self._attr_name = f"{circuit_name} Power"
-        self._attr_native_value = coordinator.get_live_power(self._circuit_id)
+        self._attr_native_value = coordinator.get_circuit_power(
+            panel.guid, self._circuit_id
+        )
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -113,7 +130,9 @@ class LuminCircuitPowerSensor(
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        power = self.coordinator.get_live_power(self._circuit_id)
+        power = self.coordinator.get_circuit_power(
+            self._panel.guid, self._circuit_id
+        )
         if power is not None:
             self._attr_native_value = round(power, 1)
         circuit = self.coordinator.get_circuit(self._panel.guid, self._circuit_id)
@@ -126,11 +145,16 @@ class LuminCircuitPowerSensor(
                 "power_on": circuit.get("power_on", False),
                 "active": circuit.get("active", False),
                 "main": circuit.get("main", False),
+                "paired": bool(circuit.get("pair")),
             }
         self.async_write_ha_state()
 
     @property
     def available(self) -> bool:
+        # A circuit paired from the Lumin app while Home Assistant is running
+        # becomes a leg without a reload; it must stop reporting its half.
+        if self.coordinator.is_pair_leg(self._circuit_id):
+            return False
         return self.coordinator.is_panel_available(self._panel.guid)
 
 
@@ -194,6 +218,8 @@ class LuminCircuitMaxPowerSensor(
 
     @property
     def available(self) -> bool:
+        if self.coordinator.is_pair_leg(self._circuit_id):
+            return False
         return self.coordinator.is_panel_available(self._panel.guid)
 
 
@@ -255,7 +281,19 @@ class LuminCircuitEnergySensor(
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        power = self.coordinator.get_live_power(self._circuit_id)
+        if self.coordinator.is_pair_leg(self._circuit_id):
+            # Paired in the Lumin app while Home Assistant is running: the
+            # primary circuit now carries both legs, so integrating here as
+            # well would count the same load twice. Drop the sample and clear
+            # the integrator so unpairing later does not jump the total.
+            self._last_power = None
+            self._last_update = None
+            self.async_write_ha_state()
+            return
+
+        power = self.coordinator.get_circuit_power(
+            self._panel.guid, self._circuit_id
+        )
         if power is not None and power >= 0:
             now = time.monotonic()
             if self._last_power is not None and self._last_update is not None:
@@ -279,6 +317,8 @@ class LuminCircuitEnergySensor(
 
     @property
     def available(self) -> bool:
+        if self.coordinator.is_pair_leg(self._circuit_id):
+            return False
         return self.coordinator.is_panel_available(self._panel.guid)
 
 
@@ -319,12 +359,7 @@ class LuminPanelTotalPowerSensor(
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        total = 0.0
-        circuits = self.coordinator.get_circuits(self._panel.guid)
-        for circuit in circuits:
-            power = self.coordinator.get_live_power(circuit["id"])
-            if power is not None and power >= 0:
-                total += power
+        total = self.coordinator.get_panel_power(self._panel.guid) or 0.0
         self._attr_native_value = round(total, 0)
         self.async_write_ha_state()
 
@@ -384,12 +419,9 @@ class LuminPanelTotalEnergySensor(
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        total_power = 0.0
-        circuits = self.coordinator.get_circuits(self._panel.guid)
-        for circuit in circuits:
-            power = self.coordinator.get_live_power(circuit["id"])
-            if power is not None and power >= 0:
-                total_power += power
+        # Integrate the same quantity the Total Power sensor displays, so the
+        # two panel-level entities always agree.
+        total_power = self.coordinator.get_panel_power(self._panel.guid) or 0.0
 
         now = time.monotonic()
         if (
