@@ -6,7 +6,9 @@ Protocol (decoded from portal JS bundle):
 - Subscribe: send {"type": 0, "payload": {"lsp_id": <device_id>}}
   - For local connections, lsp_id can be 0 or the actual device ID.
 - Server pushes {"type": <int>, "event": <data>}
-  - Type 6: Power readings — {"readings": {"circuit_id": {"power": W}}, "time": ts}
+  - Type 6: Power readings — {"readings": {"circuit_id": {"power": W}}, "time": ts}.
+    Power may be the string "N/A" for a leg with no reading; such entries are
+    dropped rather than stored.
   - Type 7: Circuit active state change — {"circuit_id": id, "turned": bool}
   - Type 4: Circuit switched — {"circuit_id": id, "power_on": bool, "reason": int}
 """
@@ -189,10 +191,19 @@ class LuminWebSocketClient:
             readings = event.get("readings", {})
             power_map: dict[str, float] = {}
             for circuit_id_str, rdata in readings.items():
-                if isinstance(rdata, dict):
-                    power_map[circuit_id_str] = rdata.get("power", 0.0)
-                else:
-                    power_map[circuit_id_str] = float(rdata)
+                raw = rdata.get("power") if isinstance(rdata, dict) else rdata
+                try:
+                    # The panel (and the portal) can report "N/A" for a leg it
+                    # has no reading for. Keep only real numbers: a string here
+                    # would land in the live-power map and raise TypeError the
+                    # moment a paired leg is added to it.
+                    power_map[circuit_id_str] = float(raw)
+                except (TypeError, ValueError):
+                    _LOGGER.debug(
+                        "Ignoring non-numeric power reading for circuit %s: %r",
+                        circuit_id_str,
+                        raw,
+                    )
             if power_map:
                 self._on_power_readings(power_map)
 

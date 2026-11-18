@@ -20,7 +20,12 @@ jobs:
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: "3.12"
-      - run: pip install ruff
+      # Pinned, not `pip install ruff`: an unpinned linter changes its default
+      # rule selection between releases, so a green run could turn red (or a
+      # real finding could disappear) on a day nothing in this repo changed.
+      # Bump this deliberately, in a commit that addresses whatever the new
+      # version flags.
+      - run: pip install ruff==0.17.4
       - run: ruff check .
 
   test:
