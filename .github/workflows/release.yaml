@@ -1,41 +1,205 @@
 name: Release
+
+# Auto-release on merge to master. There is no release pull request: this
+# workflow derives the next version from the conventional commits since the last
+# `v*` tag, writes the version files, commits them, then tags and releases that
+# commit.
+#
+# Why not release-please? Its publish step only tags pull requests that a human
+# *merged*: release-please 16.12.0 `src/manifest.js: buildReleases()` iterates
+# `findMergedReleasePullRequests()`, and `createRelease()` only calls
+# `github.createRelease` — it never writes a version file. So
+# `skip-github-pull-request: true` opens no PR, finds no merged PR to tag, and
+# writes nothing: it is a permanent no-op, not an auto-release mode.
+#
+# Do NOT re-add a `release-type` input to any release action. That input makes
+# release-please-action build an in-memory config and ignore
+# `release-please-config.json` — which is what broke release PR #15 — and the
+# `validate` job in ci.yaml fails the build if it comes back.
+#
+# `release-please-config.json` is still the source of truth for the version-file
+# list (`extra-files`) and the pre-1.0 bump flags; `.github/scripts/release.py`
+# reads both.
+
 on:
   push:
     branches: [master]
+  # Manual escape hatch, deliberately kept:
+  #  * re-run a release that failed *after* the version commit landed but before
+  #    the tag/release existed (the tag step is idempotent);
+  #  * release an explicit `version` when the computed one is wrong.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Explicit version to release (e.g. 0.1.2). Empty = derive from commits."
+        required: false
+        default: ""
+      dry-run:
+        description: "Only print the computed release plan; do not commit, tag or release."
+        type: boolean
+        default: false
+
+# Serialised so the push that re-triggers this workflow cannot race the run that
+# is already creating the tag.
+concurrency:
+  group: release-master
+  cancel-in-progress: false
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
-  release-please:
+  release:
     runs-on: [self-hosted, linux, x64, krubecible, holybits-shared]
-    outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-      version: ${{ steps.release.outputs.version }}
     steps:
-      - uses: googleapis/release-please-action@7987652d64b4581673a76e33ad5e98e3dd56832f # v4.1.3
-        id: release
+      # `persist-credentials: false` keeps the token out of `.git/config`; the
+      # push below presents it through an ephemeral credential helper instead.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          release-type: python
-          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
 
-  # `sync-manifest` used to `git push` a manifest.json version bump to master
-  # after release-please created the release. That push can never succeed on a
-  # protected branch (`GH006: 3 of 3 required status checks are expected`), and
-  # it was never needed: `release-please-config.json` lists
-  # `custom_components/lumin/manifest.json` in `extra-files`, and release-please
-  # bumps it inside the release PR together with `.release-please-manifest.json`
-  # (verified on the 0.1.1 release PR #13, which changed both files). The guard
-  # that replaced it lives in ci.yaml's `validate` job: it fails when the two
-  # files disagree, which catches a skipped updater before the tag exists —
-  # where a post-release push could not have helped anyway.
-  #
-  # `dispatch-image-build` used to dispatch `publish-image.yaml` at the new tag,
-  # because release-please mints the tag with GITHUB_TOKEN and GitHub does not
-  # run `on: push: tags` workflows for a tag pushed by GITHUB_TOKEN. The image
-  # pipeline was retired (ADR-0162: HACS delivers this integration from the
-  # GitHub release; no workload pulls the Harbor payload image), so there is
-  # nothing to dispatch. Restoring a Harbor carrier means restoring that
-  # workflow and this job together.
+      - name: Skip a run re-triggered by the release commit
+        id: dedupe
+        run: |
+          # The push that creates the version commit re-triggers this workflow.
+          # Its HEAD is that commit, so there is nothing to release. A manual
+          # dispatch bypasses this so a half-finished release can be retried.
+          subject=$(git log -1 --format=%s)
+          case "$subject" in
+            "chore(release): "*)
+              if [ "${{ github.event_name }}" = "push" ]; then
+                echo "skip=true" >> "$GITHUB_OUTPUT"
+                echo "HEAD is a release commit ($subject); nothing to do."
+                exit 0
+              fi
+              ;;
+          esac
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Plan release
+        id: plan
+        if: steps.dedupe.outputs.skip != 'true'
+        env:
+          EXPLICIT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$EXPLICIT_VERSION" ]; then
+            {
+              echo "release=true"
+              echo "version=$EXPLICIT_VERSION"
+              echo "previous_version=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+              echo "reason=explicit version from workflow_dispatch"
+            } | tee -a "$GITHUB_OUTPUT"
+          else
+            python3 .github/scripts/release.py plan | tee -a "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report the plan
+        if: steps.dedupe.outputs.skip != 'true'
+        run: |
+          {
+            echo "### Release plan"
+            echo ""
+            echo "| field | value |"
+            echo "| --- | --- |"
+            echo "| release | \`${{ steps.plan.outputs.release }}\` |"
+            echo "| version | \`${{ steps.plan.outputs.version }}\` |"
+            echo "| previous | \`${{ steps.plan.outputs.previous_version }}\` |"
+            echo "| reason | ${{ steps.plan.outputs.reason }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # This repository's master branch requires an approving review and three
+      # status checks, and `enforce_admins` is false, so only a repository
+      # *admin* token can push the version commit. A bot token (GITHUB_TOKEN or
+      # an App installation token) is rejected with GH006 — exactly the failure
+      # that killed the old `sync-manifest` job. Fail loudly instead of skipping
+      # a release silently. (`secrets` is not available in `if:`, hence the
+      # in-script check.)
+      - name: Require a token that can push to master
+        if: steps.plan.outputs.release == 'true' && inputs.dry-run != true
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          if [ -n "$RELEASE_TOKEN" ]; then
+            exit 0
+          fi
+          {
+            echo "::error::A release is due but RELEASE_TOKEN is not configured."
+            echo ""
+            echo "### Admin action required"
+            echo ""
+            echo "Master requires 1 approving review + \`lint\`/\`test\`/\`validate\`, and"
+            echo "\`enforce_admins\` is false, so a repository admin token is the only"
+            echo "thing that can push the version commit."
+            echo ""
+            echo "Create a **fine-grained PAT** owned by a repository admin with"
+            echo "\`contents: write\` on this repository and store it as the"
+            echo "\`RELEASE_TOKEN\` secret. Then re-run this workflow"
+            echo "(\`workflow_dispatch\`) — no code change is needed."
+            echo ""
+            echo "No tag was created, so nothing is inconsistent."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
+      - name: Apply the version bump
+        if: steps.plan.outputs.release == 'true' && inputs.dry-run != true
+        env:
+          VERSION: ${{ inputs.version || steps.plan.outputs.version }}
+        run: |
+          python3 .github/scripts/release.py apply \
+            --version "$VERSION" \
+            --repo "$GITHUB_REPOSITORY"
+
+      - name: Commit and push the version bump
+        id: commit
+        if: steps.plan.outputs.release == 'true' && inputs.dry-run != true
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          VERSION: ${{ inputs.version || steps.plan.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "Version files already at $VERSION; nothing to commit."
+            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git add custom_components/lumin/manifest.json \
+                  .release-please-manifest.json \
+                  CHANGELOG.md
+          git commit -m "chore(release): v$VERSION"
+          git -c credential.helper='!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f' \
+            push origin HEAD:master
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Tag and publish the GitHub release
+        if: steps.plan.outputs.release == 'true' && inputs.dry-run != true
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          VERSION: ${{ inputs.version || steps.plan.outputs.version }}
+        run: |
+          TAG="v$VERSION"
+          # Idempotent: a manual re-run after a failed tag step must not fail.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; nothing to do."
+            exit 0
+          fi
+          python3 - "$VERSION" > /tmp/release-notes.md <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          version = sys.argv[1]
+          text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          match = re.search(
+              rf"^## \[?{re.escape(version)}\]?[ (].*?(?=^## |\Z)",
+              text,
+              re.MULTILINE | re.DOTALL,
+          )
+          print(match.group(0).strip() if match else f"Release v{version}")
+          PY
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$(git rev-parse HEAD)" \
+            --title "$TAG" \
+            --notes-file /tmp/release-notes.md
