@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.2](https://github.com/HolyBitsLLC/ha-lumin-smart-panel/compare/v0.1.1...v0.1.2) (2026-11-18)
+
+
+### Bug Fixes
+
+* **ci:** retire the unused Harbor image build and stop pushing manifest.json to master ([#14](https://github.com/HolyBitsLLC/ha-lumin-smart-panel/issues/14)) ([72be82c](https://github.com/HolyBitsLLC/ha-lumin-smart-panel/commit/72be82c3b9b3ec0a84cbc8d8c34c40ba7b6691b7))
+* **sensor:** reunify paired 240V legs from the panel's own pairing ([#16](https://github.com/HolyBitsLLC/ha-lumin-smart-panel/issues/16)) ([9ae6480](https://github.com/HolyBitsLLC/ha-lumin-smart-panel/commit/9ae6480adb6178d5766b4d4a8a4e231ef65e120f))
+
 ## [0.1.1](https://github.com/HolyBitsLLC/ha-lumin-smart-panel/compare/v0.1.0...v0.1.1) (2026-11-16)
 
 
