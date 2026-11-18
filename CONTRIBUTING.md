@@ -59,6 +59,116 @@ the patch.
 re-run a release that failed after the version commit landed, or to pass an
 explicit `version`.
 
+`validate-hacs` runs on `ubuntu-latest` for every event: `hacs/action` is a
+Docker container action and the self-hosted pool has no Docker daemon by design
+(image builds use kaniko in Kubernetes).
+
+### One-time admin setup
+
+Two pieces, both admin-only. Until they exist the Release workflow fails before
+creating a commit or a tag, and the only symptom is that no release is cut — it
+never leaves a half-written state.
+
+**1. Repository secrets** (Settings → Secrets and variables → Actions → *Secrets*):
+
+| Secret | Value |
+| --- | --- |
+| `APP_ID` | `4048591` — the `agent-holybits` GitHub App ID (from `GET /app`) |
+| `APP_PRIVATE_KEY` | that App's private key, full PEM including the BEGIN/END lines |
+
+Repository-level is sufficient: the workflow only needs an installation token
+for *this* repository. Use an organisation secret only if you want the same
+credential shared with other repos — the PEM is App-wide either way, so the
+blast radius is the App's installation set, not this repo.
+
+**2. A branch ruleset with the App in `bypass_actors`.** An App installation
+token is *not* a repository admin, and classic branch protection has no bypass
+list — only `enforce_admins`. So while `master` uses classic protection, the
+App's push is rejected with `GH006: 3 of 3 required status checks are expected`
+(the same failure the old `sync-manifest` job hit). Create the ruleset below, then
+**delete the classic branch protection rule for `master` in the same sitting**:
+rulesets *layer* with classic protection and "the most restrictive version of
+the rule applies", so leaving classic protection in place keeps the App blocked.
+
+```json
+{
+  "name": "protect-master",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["~DEFAULT_BRANCH"],
+      "exclude": []
+    }
+  },
+  "bypass_actors": [
+    {
+      "actor_id": 4048591,
+      "actor_type": "Integration",
+      "bypass_mode": "always"
+    }
+  ],
+  "rules": [
+    { "type": "deletion" },
+    { "type": "non_fast_forward" },
+    {
+      "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": 1,
+        "dismiss_stale_reviews_on_push": true,
+        "require_code_owner_review": true,
+        "require_last_push_approval": true,
+        "required_review_thread_resolution": true
+      }
+    },
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": true,
+        "required_status_checks": [
+          { "context": "lint" },
+          { "context": "test" },
+          { "context": "validate" }
+        ]
+      }
+    }
+  ]
+}
+```
+
+`actor_id` is the **App ID**, not the installation ID and not the bot user ID:
+for `actor_type: "Integration"` the API's `actor_id` is the entity's own ID, the
+same way the `User` bypass entries in our other rulesets use the user's ID.
+Every parameter the API marks Required is present; the omitted optional ones
+keep their permissive defaults (`allowed_merge_methods` defaults to all three,
+so merge methods stay unrestricted exactly as today). Nothing is weakened
+relative to today's classic rule: 1 approving review, code owner review,
+stale-review dismissal, last-push approval, conversation resolution, the same
+three required checks (strict), no force pushes, no deletion.
+`required_signatures` is deliberately **not** added — the release commit is
+created locally and pushed, so it is not signed, and adding that rule would only
+be survivable via the App bypass.
+
+Apply it with an admin token, then remove the classic rule **in the same
+sitting** (rulesets and classic protection layer, and the stricter one wins):
+
+```bash
+# 1. create the ruleset (from the JSON above, saved as protect-master.json)
+gh api -X POST repos/HolyBitsLLC/ha-lumin-smart-panel/rulesets \
+  --input protect-master.json
+
+# 2. retire the classic rule; until this runs, the App stays blocked
+gh api -X DELETE repos/HolyBitsLLC/ha-lumin-smart-panel/branches/master/protection
+```
+
+This repository's Release job does **not** gate on CI: it runs on the push and
+pushes its own version-only commit (three version/changelog files) through the
+App bypass. That is a deliberate trade-off — the reviewed PR already passed
+`lint`/`test`/`validate`, and waiting for the push's own checks would mean
+polling for many minutes inside the release run. A red `validate-hacs` on the
+release commit would therefore be cosmetic rather than blocking, which is why
+that job is pinned to a runner that can actually execute it.
+
 There is no Harbor payload image to build: since ADR-0162 the integration is
 delivered through HACS from the GitHub release, not from an image the cluster
 pulls.
