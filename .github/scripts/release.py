@@ -1,14 +1,18 @@
 """Compute and apply the next release version for the `lumin` integration.
 
-This repository releases on every qualifying merge to `master`, so the version
-number, `custom_components/lumin/manifest.json`, `.release-please-manifest.json`
-and `CHANGELOG.md` must be derived from git history rather than from a release
-pull request.
+The release is two-step but fully computed: on a qualifying push to `master` the
+workflow asks `plan` for the next version, `apply` writes it into
+`custom_components/lumin/manifest.json`, `.release-please-manifest.json` and
+`CHANGELOG.md`, and the result is pushed as a `release/vX.Y.Z` pull request.
+Merging that PR tags the commit and publishes the GitHub release.
+
+Nothing is derived by hand, and nothing needs a branch-protection bypass: the
+only manual step is approving the one-commit release PR.
 
 Why not release-please? Its publish step (`Manifest.createReleases`) only tags
-pull requests that a human *merged*; with `skip-github-pull-request` no release
-pull request is ever opened, so nothing is ever tagged and no version file is
-ever written. See the comment in `.github/workflows/release.yaml`.
+pull requests that a human *merged*, and `skip-github-pull-request` therefore
+neither tags nor writes a version file. Its PR-based model is what this script
+and `.github/workflows/release.yaml` implement directly.
 
 Usage:
 
@@ -20,8 +24,8 @@ Usage:
 
 Versioning follows release-please's `DefaultVersioningStrategy` with the
 `bump-minor-pre-major` / `bump-patch-for-minor-pre-major` flags read from
-`release-please-config.json`, so the switch from the release-PR model does not
-change how commits map to versions.
+`release-please-config.json`, so the version numbers stay what they were under
+the release-PR model.
 """
 
 from __future__ import annotations

@@ -41,35 +41,72 @@ changelog of the next release, it just does not trigger one by itself.
 
 ## Release Process
 
-Merging to `master` releases automatically (`.github/workflows/release.yaml`).
-There is no release pull request to merge: the workflow reads the commits since
-the last `v*` tag, computes the next version from them, writes
-`custom_components/lumin/manifest.json`, `.release-please-manifest.json` and
-`CHANGELOG.md`, commits that as `chore(release): vX.Y.Z`, and creates the tag and
-GitHub release. HACS installs that release, so the tag and the manifest version
-always have to match — the `validate` job checks it.
+Releases are two steps, and only the second one is manual.
+
+1. A qualifying merge to `master` (a `feat`/`fix`/`perf`/`deps`/`revert`
+   commit, or any breaking change) makes `.github/workflows/release.yaml`
+   compute the next version from the commits since the last `v*` tag, write
+   `custom_components/lumin/manifest.json`, `.release-please-manifest.json` and
+   `CHANGELOG.md`, push a `release/vX.Y.Z` branch, and open a one-commit
+   `chore(release): vX.Y.Z` pull request.
+2. Merging that pull request makes the workflow tag the commit and publish the
+   GitHub release. HACS installs that release, so the tag and the manifest
+   version always have to match — the `validate` job checks it.
+
+The manual cost is one approval click per release. Nothing else is by hand: the
+version, the changelog and the file edits are all derived from the commits.
 
 Versioning is pre-1.0 semantic versioning with `bump-minor-pre-major` and
-`bump-patch-for-minor-pre-major` (see `release-please-config.json`, which is no
-longer driven by release-please: the release script reads its `extra-files` and
-bump flags directly): a breaking change bumps the minor, a feature or fix bumps
-the patch.
+`bump-patch-for-minor-pre-major` (read from `release-please-config.json`, which
+is no longer driven by release-please: the release script reads its
+`extra-files` and bump flags directly): a breaking change bumps the minor, a
+feature or fix bumps the patch.
 
-`workflow_dispatch` on the Release workflow is the manual escape hatch: use it to
-re-run a release that failed after the version commit landed, or to pass an
-explicit `version`.
+`workflow_dispatch` on the Release workflow is the manual escape hatch: re-run
+it to tag a release whose PR merged but whose release is missing (the tag step
+is idempotent), or pass an explicit `version`, or `dry-run` to see the plan
+without creating a branch or PR.
 
 `validate-hacs` runs on `ubuntu-latest` for every event: `hacs/action` is a
 Docker container action and the self-hosted pool has no Docker daemon by design
 (image builds use kaniko in Kubernetes).
 
-### One-time admin setup
+### Why there is no bypass actor
 
-Two pieces, both admin-only. Until they exist the Release workflow fails before
-creating a commit or a tag, and the only symptom is that no release is cut — it
-never leaves a half-written state.
+The release PR exists only because the version commit has to touch `master`,
+which requires 1 approving review, code-owner review and three status checks,
+with `enforce_admins: false`. A bot cannot push there. The one thing that would
+let it is a ruleset `bypass_actors` entry, and that trade is not worth it:
 
-**1. Repository secrets** (Settings → Secrets and variables → Actions → *Secrets*):
+- `bypass_mode: "always"` is **unscoped**. It is not "may push a version bump"
+  — it is "may write any commit to `master`, force-push it, and delete the
+  branch, with no review and no status checks". The rules it would skip include
+  `deletion` and `non_fast_forward`.
+- The credential is App-wide. `agent-holybits`'s private key is installed on
+  every repository the App is installed on and lives in Vaultwarden and on a
+  shared multi-agent host (`~/.ssh/holybitsagent.pem`). Making it a
+  `master`-write credential for this repo means every agent session on that host
+  holds one, for this repository's `manifest.json` — the `requirements` line
+  that HACS `pip install`s into every user's Home Assistant.
+- There is no `Integration` bypass in this organisation today, and
+  `agent-skills` has no bypass at all. This would be a new pattern, not an
+  existing one.
+
+`bypass_mode: "pull_request"` is the only narrower alternative, and it does not
+solve the problem: per GitHub's docs it is for "grant[ing] bypass to an actor
+without allowing them to push directly to a repository" — the actor must open a
+PR "*and can then choose to bypass any branch protections and merge that pull
+request*". So it would still be an unscoped "merge anything without review"
+credential; it only trades a direct push for a self-merged PR. `exempt` is worse
+again: rules are not run at all *and no bypass audit entry is created*.
+
+Against that, the alternative costs one approval click per release.
+
+### One-time setup
+
+One piece, admin-only: add two repository secrets
+(Settings → Secrets and variables → Actions → *Secrets*). No branch-protection
+or ruleset change is required, and no bypass actor is added.
 
 | Secret | Value |
 | --- | --- |
@@ -77,18 +114,25 @@ never leaves a half-written state.
 | `APP_PRIVATE_KEY` | that App's private key, full PEM including the BEGIN/END lines |
 
 Repository-level is sufficient: the workflow only needs an installation token
-for *this* repository. Use an organisation secret only if you want the same
-credential shared with other repos — the PEM is App-wide either way, so the
-blast radius is the App's installation set, not this repo.
+for *this* repository. An organisation secret works too but buys nothing — the
+PEM is App-wide regardless of where it is stored, so its blast radius is the
+App's installation set either way.
 
-**2. A branch ruleset with the App in `bypass_actors`.** An App installation
-token is *not* a repository admin, and classic branch protection has no bypass
-list — only `enforce_admins`. So while `master` uses classic protection, the
-App's push is rejected with `GH006: 3 of 3 required status checks are expected`
-(the same failure the old `sync-manifest` job hit). Create the ruleset below, then
-**delete the classic branch protection rule for `master` in the same sitting**:
-rulesets *layer* with classic protection and "the most restrictive version of
-the rule applies", so leaving classic protection in place keeps the App blocked.
+The token is requested with only `contents: write` and `pull-requests: write`.
+It is deliberately **not** granted any protection bypass, so it can push a
+release branch and open a PR, but it cannot write to `master` — that still needs
+a human approval, exactly as for any other change.
+
+Until the secrets exist the Release workflow fails **before** writing anything
+(no branch, no PR, no tag), with the instruction above in the step summary.
+
+### Appendix: the bypass ruleset, if that judgement is ever revisited
+
+Not applied, and not recommended. Recorded so the work is not repeated. It
+requires migrating `master` off classic branch protection (classic has no bypass
+list, only `enforce_admins`), and rulesets *layer* with classic protection, so
+leaving the classic rule in place keeps the App blocked — "the most restrictive
+version of the rule applies".
 
 ```json
 {
@@ -96,17 +140,10 @@ the rule applies", so leaving classic protection in place keeps the App blocked.
   "target": "branch",
   "enforcement": "active",
   "conditions": {
-    "ref_name": {
-      "include": ["~DEFAULT_BRANCH"],
-      "exclude": []
-    }
+    "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] }
   },
   "bypass_actors": [
-    {
-      "actor_id": 4048591,
-      "actor_type": "Integration",
-      "bypass_mode": "always"
-    }
+    { "actor_id": 4048591, "actor_type": "Integration", "bypass_mode": "always" }
   ],
   "rules": [
     { "type": "deletion" },
@@ -136,38 +173,19 @@ the rule applies", so leaving classic protection in place keeps the App blocked.
 }
 ```
 
-`actor_id` is the **App ID**, not the installation ID and not the bot user ID:
-for `actor_type: "Integration"` the API's `actor_id` is the entity's own ID, the
-same way the `User` bypass entries in our other rulesets use the user's ID.
-Every parameter the API marks Required is present; the omitted optional ones
-keep their permissive defaults (`allowed_merge_methods` defaults to all three,
-so merge methods stay unrestricted exactly as today). Nothing is weakened
-relative to today's classic rule: 1 approving review, code owner review,
-stale-review dismissal, last-push approval, conversation resolution, the same
-three required checks (strict), no force pushes, no deletion.
-`required_signatures` is deliberately **not** added — the release commit is
-created locally and pushed, so it is not signed, and adding that rule would only
-be survivable via the App bypass.
-
-Apply it with an admin token, then remove the classic rule **in the same
-sitting** (rulesets and classic protection layer, and the stricter one wins):
+`actor_id` is the **App ID** — for `actor_type: "Integration"` the API's
+`actor_id` is the entity's own ID, the same way the `User` entries in our other
+rulesets use the user's ID (harvester-argo `protect-main` is
+`{actor_id: 6446939, actor_type: "User"}`, and `GET /users/claywd` returns
+`6446939`). `required_signatures` is deliberately absent: the release commit is
+created locally and pushed, so it is not signed.
 
 ```bash
-# 1. create the ruleset (from the JSON above, saved as protect-master.json)
 gh api -X POST repos/HolyBitsLLC/ha-lumin-smart-panel/rulesets \
   --input protect-master.json
-
-# 2. retire the classic rule; until this runs, the App stays blocked
+# then, in the same sitting — otherwise the App stays blocked:
 gh api -X DELETE repos/HolyBitsLLC/ha-lumin-smart-panel/branches/master/protection
 ```
-
-This repository's Release job does **not** gate on CI: it runs on the push and
-pushes its own version-only commit (three version/changelog files) through the
-App bypass. That is a deliberate trade-off — the reviewed PR already passed
-`lint`/`test`/`validate`, and waiting for the push's own checks would mean
-polling for many minutes inside the release run. A red `validate-hacs` on the
-release commit would therefore be cosmetic rather than blocking, which is why
-that job is pinned to a runner that can actually execute it.
 
 There is no Harbor payload image to build: since ADR-0162 the integration is
 delivered through HACS from the GitHub release, not from an image the cluster
