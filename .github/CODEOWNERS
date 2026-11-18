@@ -1,0 +1,37 @@
+# CODEOWNERS — HolyBitsLLC/ha-lumin-smart-panel
+#
+# Deliberately NARROW. This file lists only the surfaces where a change could
+# cause code execution inside a user's Home Assistant instance, weaken this
+# repo's CI/release pipeline, or silently change what HACS installs. Ordinary
+# integration code, tests, and docs are intentionally unowned so routine work
+# does not need an owner review.
+#
+# IMPORTANT: this file alone does not gate anything. It only takes effect when
+# the `master` branch ruleset / branch protection requires "Require review from
+# Code Owners". Until that is enabled by a repo administrator, these entries are
+# documentation, not a merge gate.
+#
+# Owners:
+#   @claywd — repo admin and the sole approver for these paths.
+
+# ---------------------------------------------------------------------------
+# CI, release automation, and agent policy. `release.yaml` holds a write-scoped
+# `GITHUB_TOKEN` (`contents: write`, `pull-requests: write`), so a change here
+# can publish a release or exfiltrate that token. `.github/copilot-instructions.md`
+# is the policy file agents load, and must not be editable without review.
+# ---------------------------------------------------------------------------
+/.github/                                 @claywd
+
+# ---------------------------------------------------------------------------
+# The HACS install contract. `manifest.json` `requirements` is the highest-risk
+# line in the repo: HACS/HA will `pip install` whatever it names into every
+# user's instance. `version` must also stay in lockstep with release-please.
+# ---------------------------------------------------------------------------
+/custom_components/lumin/manifest.json    @claywd
+
+# `hacs.json` is the other half of the delivery contract (filename/zip_release/
+# homeassistant minimum). It decides what artifact HACS installs.
+/hacs.json                                @claywd
+
+# Vulnerability disclosure policy.
+/SECURITY.md                              @claywd
