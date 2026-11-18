@@ -8,9 +8,24 @@ name: Validate
 # Home Assistant UI. The action runs the same validators HACS uses, with
 # `category: integration`.
 #
-# Policy: shared org runners only. PRs from forks fall back to GitHub-hosted
-# runners so untrusted code never executes on self-hosted infrastructure — the
-# same split ci.yaml uses.
+# Runner policy: this job is pinned to `ubuntu-latest` for EVERY event, unlike
+# ci.yaml which uses the self-hosted pool for pushes to `master`.
+#
+# `hacs/action` is a Docker *container* action (`action.yml`:
+# `image: docker://ghcr.io/hacs/action:main`), so it needs a Docker daemon. The
+# self-hosted pool deliberately has no Docker: image builds happen with kaniko
+# inside Kubernetes, not with a daemon on the runner. Running this job there
+# fails on every push to `master` — observed on `e620b58`:
+#   "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+#   "[error] Docker pull failed with exit code 1"
+# which is exactly why it passed on PRs (GitHub-hosted) and failed on push
+# (self-hosted). Do NOT try to install Docker or add a DinD sidecar to the
+# runner to "fix" this: the missing daemon is intentional.
+#
+# The alternative — reimplementing HACS's validators as plain Python steps — was
+# rejected: it would have to track hacs/integration's own validators to stay
+# equivalent, and a drifting copy silently weakens the check. This costs
+# GitHub-hosted minutes, which are free for this public repository.
 
 on:
   push:
@@ -26,7 +41,10 @@ permissions:
 
 jobs:
   validate-hacs:
-    runs-on: ${{ github.event_name == 'push' && fromJSON('["self-hosted", "linux", "x64", "krubecible", "holybits-shared"]') || 'ubuntu-latest' }}
+    # Always GitHub-hosted: see the runner-policy note at the top of this file.
+    # Pushing this job back onto the self-hosted pool makes it fail on every
+    # release commit, since that pool has no Docker daemon by design.
+    runs-on: ubuntu-latest
     steps:
       - name: HACS validation
         # Pinned to the 22.5.0 release commit, like every other action in this

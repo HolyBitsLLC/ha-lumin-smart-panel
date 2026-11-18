@@ -5,7 +5,11 @@
       "bump-minor-pre-major": true,
       "bump-patch-for-minor-pre-major": true,
       "extra-files": [
-        "custom_components/lumin/manifest.json"
+        {
+          "type": "json",
+          "path": "custom_components/lumin/manifest.json",
+          "jsonpath": "$.version"
+        }
       ]
     }
   },
